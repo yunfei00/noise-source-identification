@@ -12,7 +12,6 @@ dependencies = [
     "pyyaml",
     "tqdm",
     "torch",
-    "torchaudio",
 ]
 
 [tool.setuptools.packages.find]

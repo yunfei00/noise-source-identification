@@ -5,8 +5,9 @@ data:
   mixed_dir: data/mixed
   sample_rate: 1000000
   signal_length: 4096
-  num_samples: 3000
+  num_samples: 300
   max_sources_per_mix: 3
+  noise_std: 0.02
   train_ratio: 0.8
   val_ratio: 0.1
   test_ratio: 0.1
@@ -19,10 +20,11 @@ stft:
 
 train:
   batch_size: 32
-  epochs: 30
+  epochs: 3
   lr: 0.001
   threshold: 0.5
   device: auto
+  num_workers: 0
 
 paths:
   checkpoint_dir: outputs/checkpoints
