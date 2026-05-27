@@ -1,0 +1,20 @@
+[project]
+name = "noise-source-identification"
+version = "0.1.0"
+description = "Multi-label noise source identification based on STFT and CNN"
+requires-python = ">=3.10"
+
+dependencies = [
+    "numpy",
+    "pandas",
+    "scipy",
+    "scikit-learn",
+    "pyyaml",
+    "tqdm",
+    "torch",
+    "torchaudio",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
