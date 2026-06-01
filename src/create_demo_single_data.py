@@ -65,6 +65,7 @@ def create_demo_data(
     sample_rate: int = 1_000_000,
     signal_length: int = 4096,
     seed: int = 42,
+    with_frequency_dirs: bool = False,
 ) -> None:
     if num_files <= 0:
         raise ValueError(f"num_files must be positive, got {num_files}")
@@ -83,10 +84,22 @@ def create_demo_data(
         "switch_power": lambda: make_switch_power_signal(t, sample_rate, rng),
     }
 
-    for class_name, generator in generators.items():
-        for index in range(num_files):
-            signal = generator()
-            write_csv(root / class_name / f"{class_name}_{index:03d}.csv", t, signal)
+    if with_frequency_dirs:
+        generators = {
+            f"source_{index}": generator
+            for index, generator in enumerate(generators.values(), start=1)
+        }
+        frequencies = ("600.000MHz", "700.000MHz")
+        for class_name, generator in generators.items():
+            for frequency in frequencies:
+                for index in range(1, num_files + 1):
+                    signal = generator()
+                    write_csv(root / class_name / frequency / f"{index:06d}.csv", t, signal)
+    else:
+        for class_name, generator in generators.items():
+            for index in range(num_files):
+                signal = generator()
+                write_csv(root / class_name / f"{class_name}_{index:03d}.csv", t, signal)
 
     print(f"Wrote demo single-source CSV files to {root}")
 
@@ -98,6 +111,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sample-rate", type=int, default=1_000_000)
     parser.add_argument("--signal-length", type=int, default=4096)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--with-frequency-dirs",
+        action="store_true",
+        help="Write source_N/frequency/sample.csv demo data instead of the simple layout.",
+    )
     return parser.parse_args()
 
 
@@ -109,6 +127,7 @@ def main() -> None:
         sample_rate=args.sample_rate,
         signal_length=args.signal_length,
         seed=args.seed,
+        with_frequency_dirs=args.with_frequency_dirs,
     )
 
 
