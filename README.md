@@ -6,32 +6,49 @@ single-source noise CSV -> synthesized mixed noise samples -> STFT features -> C
 
 ## Data Layout
 
-Put real single-source CSV files under `data/single`, with one subdirectory per source class:
+Real single-source CSV files can use either of the following layouts under `data/single`.
+
+### Format A: simple source-class directories
 
 ```text
 data/single/
-  fan/
-    fan_000.csv
   motor/
-    motor_000.csv
-  switch_power/
-    switch_power_000.csv
+    001.csv
+  fan/
+    001.csv
 ```
 
-Class order is stable and sorted by directory name. The synthesis step writes it to `data/mixed/class_names.json`.
+### Format B: source-class directories with frequency conditions
 
-Generated mixed data is written to:
+```text
+data/single/
+  source_1/
+    600.000MHz/
+      000001.csv
+    700.000MHz/
+      000001.csv
+  source_2/
+    600.000MHz/
+      000001.csv
+```
+
+The two formats can coexist. In Format B, `source_1` and `source_2` are the classification labels, `600.000MHz` and `700.000MHz` are frequency-condition directory names, and `000001.csv` is one time-domain sample. Frequency conditions are not labels. Class order is stable and sorted by source-directory name. The synthesis step writes it to `data/mixed/class_names.json`.
+
+For each synthesized source contribution, the synthesis script randomly selects a frequency condition and then randomly selects one CSV from that condition. CSV files from Format A are handled as a `default` condition. Generated mixed data is written to:
 
 ```text
 data/mixed/train/x/*.npy
 data/mixed/train/y/*.npy
+data/mixed/train/metadata/*.json
 data/mixed/val/x/*.npy
 data/mixed/val/y/*.npy
+data/mixed/val/metadata/*.json
 data/mixed/test/x/*.npy
 data/mixed/test/y/*.npy
+data/mixed/test/metadata/*.json
 ```
 
-Each `x` file is a fixed-length time-domain signal. STFT features are computed dynamically in the PyTorch dataset.
+Each `x` file is a fixed-length time-domain signal. Each `y` file contains the multi-label source-class vector. Each `metadata` JSON file records the selected source class, frequency condition, relative CSV path, random gain, random shift, and label vector. STFT features are computed dynamically in the PyTorch dataset.
 
 ## CSV Format
 
@@ -69,7 +86,13 @@ When no real data is available, generate three simulated source classes:
 python -m src.create_demo_single_data
 ```
 
-This creates 10 CSV files each for `motor`, `fan`, and `switch_power`.
+This creates 10 CSV files each for `motor`, `fan`, and `switch_power`. To generate demo data with frequency-condition directories instead, run:
+
+```bash
+python -m src.create_demo_single_data --with-frequency-dirs
+```
+
+This creates `source_1`, `source_2`, and `source_3` classes with `600.000MHz` and `700.000MHz` conditions, including paths such as `data/single/source_1/600.000MHz/000001.csv`.
 
 ## Synthesize Mixed Dataset
 
@@ -98,7 +121,7 @@ outputs/checkpoints/last.pt
 python -m src.infer --model outputs/checkpoints/best.pt --input path/to/mixed.csv
 ```
 
-The output lists each source class by probability:
+Inference still accepts one CSV directly and does not need a frequency argument. The output lists each source class by probability:
 
 ```text
 switch_power  0.923  存在
