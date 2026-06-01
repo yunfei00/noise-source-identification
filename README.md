@@ -115,6 +115,16 @@ outputs/checkpoints/best.pt
 outputs/checkpoints/last.pt
 ```
 
+## Evaluate
+
+Evaluate the test split at thresholds `0.3`, `0.4`, `0.5`, `0.6`, and `0.7`:
+
+```bash
+python -m src.evaluate --model outputs/checkpoints/best.pt --split test
+```
+
+The command prints per-class precision, recall, F1, and support along with overall micro, macro, and sample F1 scores. It saves the complete threshold report to `outputs/reports/eval_report.json`.
+
 ## Infer
 
 ```bash
