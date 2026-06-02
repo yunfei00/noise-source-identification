@@ -102,6 +102,8 @@ python -m src.synthesize_mixed_dataset --config configs/train.yaml
 
 The default config is intentionally small (`num_samples: 300`, `epochs: 3`) so the complete workflow can be verified quickly on CPU. Increase these values for real experiments.
 
+When `balanced_generation: true` and exactly two source classes are detected, synthesis creates an approximately equal number of `[1, 0]`, `[0, 1]`, and `[1, 1]` labels (exactly one third each when `num_samples` is divisible by three). With any other number of classes, synthesis warns and falls back to random source selection.
+
 ## Train
 
 ```bash

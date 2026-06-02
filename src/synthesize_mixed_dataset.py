@@ -124,13 +124,23 @@ def make_mixed_sample(
     max_sources_per_mix: int,
     noise_std: float,
     rng: np.random.Generator,
+    selected_indices: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, list[dict]]:
     if max_sources_per_mix <= 0:
         raise ValueError(f"max_sources_per_mix must be positive, got {max_sources_per_mix}")
 
     num_classes = len(class_names)
-    source_count = int(rng.integers(1, min(max_sources_per_mix, num_classes) + 1))
-    selected_indices = rng.choice(num_classes, size=source_count, replace=False)
+    if selected_indices is None:
+        source_count = int(rng.integers(1, min(max_sources_per_mix, num_classes) + 1))
+        selected_indices = rng.choice(num_classes, size=source_count, replace=False)
+    else:
+        selected_indices = np.asarray(selected_indices, dtype=int)
+        if selected_indices.ndim != 1 or not 1 <= len(selected_indices) <= max_sources_per_mix:
+            raise ValueError("selected_indices must contain between 1 and max_sources_per_mix class indices")
+        if len(np.unique(selected_indices)) != len(selected_indices):
+            raise ValueError("selected_indices must not contain duplicates")
+        if np.any(selected_indices < 0) or np.any(selected_indices >= num_classes):
+            raise ValueError(f"selected_indices must be between 0 and {num_classes - 1}")
 
     mixed = np.zeros(signal_length, dtype=np.float32)
     label = np.zeros(num_classes, dtype=np.float32)
@@ -168,6 +178,16 @@ def make_mixed_sample(
     return normalize_signal(mixed), label, sources
 
 
+def make_balanced_two_class_plan(num_samples: int, rng: np.random.Generator) -> list[np.ndarray]:
+    """Build a shuffled plan with approximately one third of each two-class label."""
+    label_indices = (np.array([0]), np.array([1]), np.array([0, 1]))
+    counts = np.full(len(label_indices), num_samples // len(label_indices), dtype=int)
+    counts[: num_samples % len(label_indices)] += 1
+    plan = [indices for indices, count in zip(label_indices, counts) for _ in range(int(count))]
+    rng.shuffle(plan)
+    return plan
+
+
 def synthesize_dataset(config: dict) -> None:
     data_config = config.get("data", {})
     single_dir = Path(data_config.get("single_dir", "data/single"))
@@ -175,6 +195,7 @@ def synthesize_dataset(config: dict) -> None:
     signal_length = int(data_config.get("signal_length", 4096))
     num_samples = int(data_config.get("num_samples", 300))
     max_sources_per_mix = int(data_config.get("max_sources_per_mix", 3))
+    balanced_generation = bool(data_config.get("balanced_generation", False))
     noise_std = float(data_config.get("noise_std", 0.02))
     seed = int(config.get("seed", 42))
 
@@ -186,11 +207,24 @@ def synthesize_dataset(config: dict) -> None:
     )
     output_root = prepare_output_dirs(mixed_dir)
 
+    rng = np.random.default_rng(seed)
+    balanced_plan: list[np.ndarray] | None = None
+    if balanced_generation and len(class_names) == 2:
+        if max_sources_per_mix < 2:
+            raise ValueError("balanced_generation requires max_sources_per_mix >= 2")
+        balanced_plan = make_balanced_two_class_plan(num_samples, rng)
+    elif balanced_generation:
+        warnings.warn(
+            "balanced_generation is only supported for exactly two source classes; "
+            f"found {len(class_names)} classes, falling back to random generation.",
+            stacklevel=2,
+        )
+
     class_names_path = output_root / "class_names.json"
     with class_names_path.open("w", encoding="utf-8") as handle:
         json.dump(class_names, handle, ensure_ascii=False, indent=2)
 
-    rng = np.random.default_rng(seed)
+    plan_index = 0
     for split, count in counts.items():
         for index in tqdm(range(count), desc=f"synthesizing {split}"):
             sample_id = f"mixed_{index:06d}"
@@ -201,7 +235,9 @@ def synthesize_dataset(config: dict) -> None:
                 max_sources_per_mix,
                 noise_std,
                 rng,
+                selected_indices=None if balanced_plan is None else balanced_plan[plan_index],
             )
+            plan_index += 1
             np.save(output_root / split / "x" / f"{sample_id}.npy", x)
             np.save(output_root / split / "y" / f"{sample_id}.npy", y)
             metadata = {
