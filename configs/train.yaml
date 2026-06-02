@@ -21,11 +21,24 @@ stft:
 
 train:
   batch_size: 32
-  epochs: 3
+  epochs: 200
   lr: 0.001
   threshold: 0.5
   device: auto
   num_workers: 0
+
+early_stopping:
+  enabled: true
+  monitor: micro_f1
+  mode: max
+  patience: 15
+  min_delta: 0.001
+
+scheduler:
+  enabled: true
+  type: ReduceLROnPlateau
+  factor: 0.5
+  patience: 5
 
 paths:
   checkpoint_dir: outputs/checkpoints
