@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import random
 from pathlib import Path
@@ -10,6 +11,7 @@ import torch
 import yaml
 from sklearn.metrics import f1_score
 from torch import nn
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader
 
 from src.dataset import MixedNoiseDataset
@@ -117,6 +119,46 @@ def compute_f1(probs: np.ndarray, targets: np.ndarray, threshold: float) -> tupl
     return float(micro), float(macro)
 
 
+class EarlyStopping:
+    def __init__(self, mode: str = "max", patience: int = 15, min_delta: float = 0.001) -> None:
+        if mode not in {"min", "max"}:
+            raise ValueError(f"Early stopping mode must be 'min' or 'max', got {mode}")
+        if patience < 1:
+            raise ValueError(f"Early stopping patience must be >= 1, got {patience}")
+        if min_delta < 0:
+            raise ValueError(f"Early stopping min_delta must be >= 0, got {min_delta}")
+        self.mode = mode
+        self.patience = patience
+        self.min_delta = min_delta
+        self.best_metric: float | None = None
+        self.bad_epochs = 0
+
+    def step(self, metric: float) -> bool:
+        if self.best_metric is None or self._is_improvement(metric):
+            self.best_metric = metric
+            self.bad_epochs = 0
+        else:
+            self.bad_epochs += 1
+        return self.bad_epochs >= self.patience
+
+    def _is_improvement(self, metric: float) -> bool:
+        if self.best_metric is None:
+            return True
+        if self.mode == "max":
+            return metric > self.best_metric + self.min_delta
+        return metric < self.best_metric - self.min_delta
+
+
+def save_training_history(path: str | Path, history: list[dict[str, float | int]]) -> None:
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = ["epoch", "train_loss", "val_loss", "micro_f1", "macro_f1", "lr"]
+    with output_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(history)
+
+
 def save_checkpoint(
     path: str | Path,
     model: nn.Module,
@@ -141,11 +183,14 @@ def train(config: dict) -> None:
 
     data_config = config.get("data", {})
     train_config = config.get("train", {})
+    early_stopping_config = config.get("early_stopping", {})
+    scheduler_config = config.get("scheduler", {})
     paths_config = config.get("paths", {})
 
     class_names = load_class_names(data_config.get("mixed_dir", "data/mixed"))
     device = resolve_device(str(train_config.get("device", "auto")))
     checkpoint_dir = Path(paths_config.get("checkpoint_dir", "outputs/checkpoints"))
+    report_dir = Path(paths_config.get("report_dir", "outputs/reports"))
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     train_loader = make_loader(config, "train", shuffle=True)
@@ -155,12 +200,38 @@ def train(config: dict) -> None:
     criterion = nn.BCEWithLogitsLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=float(train_config.get("lr", 1e-3)))
     threshold = float(train_config.get("threshold", 0.5))
-    epochs = int(train_config.get("epochs", 3))
+    epochs = int(train_config.get("epochs", 200))
+
+    scheduler = None
+    if bool(scheduler_config.get("enabled", False)):
+        scheduler_type = str(scheduler_config.get("type", "ReduceLROnPlateau"))
+        if scheduler_type != "ReduceLROnPlateau":
+            raise ValueError(f"Unsupported scheduler type: {scheduler_type}")
+        scheduler = ReduceLROnPlateau(
+            optimizer,
+            mode="max",
+            factor=float(scheduler_config.get("factor", 0.5)),
+            patience=int(scheduler_config.get("patience", 5)),
+        )
+
+    early_stopping = None
+    if bool(early_stopping_config.get("enabled", False)):
+        monitor = str(early_stopping_config.get("monitor", "micro_f1"))
+        if monitor != "micro_f1":
+            raise ValueError(f"Unsupported early stopping monitor: {monitor}")
+        early_stopping = EarlyStopping(
+            mode=str(early_stopping_config.get("mode", "max")),
+            patience=int(early_stopping_config.get("patience", 15)),
+            min_delta=float(early_stopping_config.get("min_delta", 0.001)),
+        )
 
     print(f"device={device}")
     print(f"classes={class_names}")
 
     best_metric = -1.0
+    best_epoch = 0
+    history: list[dict[str, float | int]] = []
+    history_path = report_dir / "training_history.csv"
     for epoch in range(1, epochs + 1):
         train_loss, _, _ = run_epoch(model, train_loader, criterion, device, optimizer)
         val_loss, val_probs, val_targets = run_epoch(model, val_loader, criterion, device)
@@ -168,6 +239,7 @@ def train(config: dict) -> None:
 
         if micro_f1 > best_metric:
             best_metric = micro_f1
+            best_epoch = epoch
             save_checkpoint(
                 checkpoint_dir / "best.pt",
                 model,
@@ -176,6 +248,10 @@ def train(config: dict) -> None:
                 epoch,
                 best_metric,
             )
+
+        if scheduler is not None:
+            scheduler.step(micro_f1)
+        learning_rate = float(optimizer.param_groups[0]["lr"])
 
         save_checkpoint(
             checkpoint_dir / "last.pt",
@@ -186,13 +262,32 @@ def train(config: dict) -> None:
             best_metric,
         )
 
+        history.append(
+            {
+                "epoch": epoch,
+                "train_loss": train_loss,
+                "val_loss": val_loss,
+                "micro_f1": micro_f1,
+                "macro_f1": macro_f1,
+                "lr": learning_rate,
+            }
+        )
+        save_training_history(history_path, history)
+
         print(
-            f"epoch={epoch:03d} "
+            f"Epoch={epoch:03d} "
             f"train_loss={train_loss:.4f} "
             f"val_loss={val_loss:.4f} "
             f"micro_f1={micro_f1:.4f} "
-            f"macro_f1={macro_f1:.4f}"
+            f"macro_f1={macro_f1:.4f} "
+            f"learning_rate={learning_rate:.6g}"
         )
+
+        if early_stopping is not None and early_stopping.step(micro_f1):
+            print("Early stopping triggered.")
+            print(f"Best micro_f1={best_metric:.4f}")
+            print(f"Best epoch={best_epoch}")
+            break
 
 
 def parse_args() -> argparse.Namespace:

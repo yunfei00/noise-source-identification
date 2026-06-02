@@ -100,7 +100,7 @@ This creates `source_1`, `source_2`, and `source_3` classes with `600.000MHz` an
 python -m src.synthesize_mixed_dataset --config configs/train.yaml
 ```
 
-The default config is intentionally small (`num_samples: 300`, `epochs: 3`) so the complete workflow can be verified quickly on CPU. Increase these values for real experiments.
+The default config synthesizes `num_samples: 300` examples and allows up to `epochs: 200` training epochs. Training monitors validation `micro_f1`, reduces the learning rate when it plateaus, and stops early when it no longer improves.
 
 When `balanced_generation: true` and exactly two source classes are detected, synthesis creates an approximately equal number of `[1, 0]`, `[0, 1]`, and `[1, 1]` labels (exactly one third each when `num_samples` is divisible by three). With any other number of classes, synthesis warns and falls back to random source selection.
 
@@ -115,6 +115,12 @@ Checkpoints are saved to:
 ```text
 outputs/checkpoints/best.pt
 outputs/checkpoints/last.pt
+```
+
+Per-epoch training metrics are saved to:
+
+```text
+outputs/reports/training_history.csv
 ```
 
 ## Evaluate
