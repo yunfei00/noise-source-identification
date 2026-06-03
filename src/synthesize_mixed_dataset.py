@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import shutil
 import warnings
@@ -178,9 +179,30 @@ def make_mixed_sample(
     return normalize_signal(mixed), label, sources
 
 
-def make_balanced_two_class_plan(num_samples: int, rng: np.random.Generator) -> list[np.ndarray]:
-    """Build a shuffled plan with approximately one third of each two-class label."""
-    label_indices = (np.array([0]), np.array([1]), np.array([0, 1]))
+def make_balanced_multilabel_plan(
+    num_samples: int,
+    num_classes: int,
+    max_sources_per_mix: int,
+    rng: np.random.Generator,
+) -> list[np.ndarray]:
+    """Build a shuffled plan balancing every non-empty source combination.
+
+    For three classes and ``max_sources_per_mix == 3`` this yields the seven
+    expected combinations: single-source labels, pair labels, and the full
+    three-source label. Counts differ by at most one when ``num_samples`` is not
+    divisible by the number of combinations.
+    """
+    if num_classes <= 0:
+        raise ValueError(f"num_classes must be positive, got {num_classes}")
+    if max_sources_per_mix <= 0:
+        raise ValueError(f"max_sources_per_mix must be positive, got {max_sources_per_mix}")
+
+    max_sources = min(max_sources_per_mix, num_classes)
+    label_indices = [
+        np.asarray(indices, dtype=int)
+        for source_count in range(1, max_sources + 1)
+        for indices in itertools.combinations(range(num_classes), source_count)
+    ]
     counts = np.full(len(label_indices), num_samples // len(label_indices), dtype=int)
     counts[: num_samples % len(label_indices)] += 1
     plan = [indices for indices, count in zip(label_indices, counts) for _ in range(int(count))]
@@ -208,24 +230,19 @@ def synthesize_dataset(config: dict) -> None:
     output_root = prepare_output_dirs(mixed_dir)
 
     rng = np.random.default_rng(seed)
-    balanced_plan: list[np.ndarray] | None = None
-    if balanced_generation and len(class_names) == 2:
-        if max_sources_per_mix < 2:
-            raise ValueError("balanced_generation requires max_sources_per_mix >= 2")
-        balanced_plan = make_balanced_two_class_plan(num_samples, rng)
-    elif balanced_generation:
-        warnings.warn(
-            "balanced_generation is only supported for exactly two source classes; "
-            f"found {len(class_names)} classes, falling back to random generation.",
-            stacklevel=2,
-        )
+    if balanced_generation and max_sources_per_mix < 1:
+        raise ValueError("balanced_generation requires max_sources_per_mix >= 1")
 
     class_names_path = output_root / "class_names.json"
     with class_names_path.open("w", encoding="utf-8") as handle:
         json.dump(class_names, handle, ensure_ascii=False, indent=2)
 
-    plan_index = 0
     for split, count in counts.items():
+        balanced_plan = (
+            make_balanced_multilabel_plan(count, len(class_names), max_sources_per_mix, rng)
+            if balanced_generation
+            else None
+        )
         for index in tqdm(range(count), desc=f"synthesizing {split}"):
             sample_id = f"mixed_{index:06d}"
             x, y, sources = make_mixed_sample(
@@ -235,9 +252,8 @@ def synthesize_dataset(config: dict) -> None:
                 max_sources_per_mix,
                 noise_std,
                 rng,
-                selected_indices=None if balanced_plan is None else balanced_plan[plan_index],
+                selected_indices=None if balanced_plan is None else balanced_plan[index],
             )
-            plan_index += 1
             np.save(output_root / split / "x" / f"{sample_id}.npy", x)
             np.save(output_root / split / "y" / f"{sample_id}.npy", y)
             metadata = {

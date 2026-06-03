@@ -16,7 +16,6 @@ from src.infer import load_checkpoint
 from src.model_cnn import NoiseCNN
 from src.train import resolve_device
 
-_REQUIRED_REPORT_CLASSES = ("source_1", "source_3")
 _SOURCE_NAME_RE = re.compile(r"source_\d+")
 _UNKNOWN_GROUP_PREFIX = "unknown"
 
@@ -26,12 +25,6 @@ def _validate_class_names(class_names: Any) -> list[str]:
         isinstance(name, str) for name in class_names
     ):
         raise ValueError("Checkpoint is missing valid class_names")
-    missing = [name for name in _REQUIRED_REPORT_CLASSES if name not in class_names]
-    if missing:
-        raise ValueError(
-            "Checkpoint class_names must include "
-            f"{', '.join(_REQUIRED_REPORT_CLASSES)}; missing: {', '.join(missing)}"
-        )
     return class_names
 
 
@@ -53,12 +46,21 @@ def parse_true_label(group: str, class_names: list[str]) -> np.ndarray:
     if not source_names:
         raise ValueError(
             f"Cannot parse true label from group '{group}'. Expected names like "
-            "source_1_only, source_3_only, or source_1_source_3_mix."
+            "source_1_only, source_3_only, source_1_source_5_mix, or "
+            "source_1_source_3_source_5_mix."
         )
     if not (group.endswith("_only") or group.endswith("_mix")):
         raise ValueError(
             f"Cannot parse true label from group '{group}'. Group must end with _only or _mix."
         )
+
+    unknown_sources = sorted(source_names.difference(class_names))
+    if unknown_sources:
+        raise ValueError(
+            f"Group '{group}' contains sources not present in checkpoint class_names: "
+            f"{', '.join(unknown_sources)}"
+        )
+
     return np.asarray(
         [1 if class_name in source_names else 0 for class_name in class_names],
         dtype=np.int32,
@@ -208,13 +210,15 @@ def build_summary(
 def write_report_csv(rows: list[dict[str, Any]], output_path: str | Path) -> None:
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    probability_fields = [
+        fieldname for fieldname in rows[0] if fieldname.endswith("_prob")
+    ] if rows else []
     fieldnames = [
         "file",
         "group",
         "true_label",
         "pred_label",
-        "source_1_prob",
-        "source_3_prob",
+        *sorted(set(probability_fields)),
         "correct",
     ]
     with path.open("w", encoding="utf-8", newline="") as handle:
@@ -271,8 +275,6 @@ def infer_folder(
 ) -> dict[str, Any]:
     device = resolve_device(device_name)
     model, class_names, config = load_model_for_inference(model_path, device)
-    source_1_index = class_names.index("source_1")
-    source_3_index = class_names.index("source_3")
 
     csv_files = find_csv_files(input_dir)
     if not csv_files:
@@ -291,17 +293,20 @@ def infer_folder(
         pred_label = (probabilities >= threshold).astype(np.int32)
         correct = bool(np.array_equal(pred_label, true_label))
 
-        rows.append(
+        row = {
+            "file": str(csv_path.relative_to(root)),
+            "group": group,
+            "true_label": _label_to_text(true_label),
+            "pred_label": _label_to_text(pred_label),
+            "correct": correct,
+        }
+        row.update(
             {
-                "file": str(csv_path.relative_to(root)),
-                "group": group,
-                "true_label": _label_to_text(true_label),
-                "pred_label": _label_to_text(pred_label),
-                "source_1_prob": f"{float(probabilities[source_1_index]):.6f}",
-                "source_3_prob": f"{float(probabilities[source_3_index]):.6f}",
-                "correct": correct,
+                f"{class_name}_prob": f"{float(probabilities[class_index]):.6f}"
+                for class_index, class_name in enumerate(class_names)
             }
         )
+        rows.append(row)
         targets.append(true_label)
         preds.append(pred_label)
         probabilities_by_file.append(probabilities)
