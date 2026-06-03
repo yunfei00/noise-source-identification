@@ -1,19 +1,95 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
+import re
 
 import numpy as np
-import pandas as pd
 from scipy.signal import stft
 
 
-def read_signal_csv(path: str | Path) -> np.ndarray:
-    """Read a one-dimensional signal from a CSV file.
+_TOKEN_SPLIT_RE = re.compile(r"[,\s]+")
 
-    Supported layouts:
-    - value
-    - time,value
-    - either layout with or without a header row
+
+@dataclass(frozen=True)
+class SignalCsvInfo:
+    """Parsed signal values plus CSV layout metadata for diagnostics."""
+
+    values: np.ndarray
+    found_data_line: bool
+    data_line_number: int | None
+
+
+def _split_numeric_tokens(line: str) -> list[str]:
+    return [token for token in _TOKEN_SPLIT_RE.split(line.strip()) if token]
+
+
+def _parse_float(token: str) -> float | None:
+    try:
+        return float(token)
+    except ValueError:
+        return None
+
+
+def _finite_float32_values(values: list[float], csv_path: Path) -> np.ndarray:
+    array = np.asarray(values, dtype=np.float64)
+    if array.size:
+        array = array[np.isfinite(array)]
+    if array.size == 0:
+        raise ValueError(f"No valid numeric samples found in {csv_path}")
+    return array.astype(np.float32, copy=False)
+
+
+def _find_data_line(lines: list[str]) -> int | None:
+    for index, line in enumerate(lines):
+        if line.strip().lower() == "data":
+            return index
+    return None
+
+
+def _parse_data_section(lines: list[str], start_index: int) -> list[float]:
+    values: list[float] = []
+    for line in lines[start_index:]:
+        if not line.strip():
+            continue
+        tokens = _split_numeric_tokens(line)
+        if not tokens:
+            continue
+        value_token = tokens[1] if len(tokens) >= 2 else tokens[0]
+        value = _parse_float(value_token)
+        if value is None:
+            continue
+        values.append(value)
+    return values
+
+
+def _parse_legacy_rows(lines: list[str]) -> list[float]:
+    values: list[float] = []
+    for line in lines:
+        if not line.strip():
+            continue
+        tokens = _split_numeric_tokens(line)
+        if not tokens:
+            continue
+        value = _parse_float(tokens[-1])
+        if value is None:
+            continue
+        values.append(value)
+    return values
+
+
+def read_signal_csv_info(path: str | Path) -> SignalCsvInfo:
+    """Read a one-dimensional signal and return parser diagnostics.
+
+    The preferred real-device layout contains arbitrary metadata followed by a
+    line whose stripped contents equal ``DATA`` (case-insensitive). Numeric rows
+    after that marker are parsed with comma, whitespace, or tab delimiters; the
+    second column is the signal value when present, otherwise the only column is
+    used.
+
+    Files without a ``DATA`` marker fall back to legacy single-column ``value``
+    or two-column ``time,value`` parsing, with optional headers skipped and the
+    last numeric column used as the signal value.
     """
     csv_path = Path(path)
     if not csv_path.exists():
@@ -22,27 +98,39 @@ def read_signal_csv(path: str | Path) -> np.ndarray:
         raise ValueError(f"Expected a CSV file, got: {csv_path}")
 
     try:
-        frame = pd.read_csv(csv_path, header=None)
-    except pd.errors.EmptyDataError as exc:
-        raise ValueError(f"CSV file is empty: {csv_path}") from exc
+        lines = csv_path.read_text(encoding="utf-8-sig", errors="replace").splitlines()
     except Exception as exc:
         raise ValueError(f"Failed to read CSV file {csv_path}: {exc}") from exc
 
-    if frame.empty or frame.shape[1] == 0:
-        raise ValueError(f"CSV file has no signal values: {csv_path}")
-
-    if frame.shape[1] == 1:
-        value_column = frame.iloc[:, 0]
-    elif frame.shape[1] == 2:
-        value_column = frame.iloc[:, 1]
-    else:
-        raise ValueError(
-            f"CSV file must have one column (value) or two columns (time,value): {csv_path}"
+    data_line_index = _find_data_line(lines)
+    if data_line_index is not None:
+        values = _parse_data_section(lines, data_line_index + 1)
+        array = _finite_float32_values(values, csv_path)
+        return SignalCsvInfo(
+            values=array,
+            found_data_line=True,
+            data_line_number=data_line_index + 1,
         )
 
-    values = pd.to_numeric(value_column, errors="coerce").to_numpy(dtype=np.float64)
-    values = values[np.isfinite(values)]
-    return values.astype(np.float32, copy=False)
+    values = _parse_legacy_rows(lines)
+    array = _finite_float32_values(values, csv_path)
+    return SignalCsvInfo(values=array, found_data_line=False, data_line_number=None)
+
+
+def read_signal_csv(path: str | Path) -> np.ndarray:
+    """Read a one-dimensional signal from a CSV file.
+
+    Preferred layout:
+    - metadata lines
+    - DATA marker line
+    - numeric samples without a header; time,value rows use the second column
+
+    Legacy layout:
+    - value
+    - time,value
+    - either layout with or without a header row
+    """
+    return read_signal_csv_info(path).values
 
 
 def fix_length(
