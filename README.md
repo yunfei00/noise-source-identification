@@ -153,6 +153,46 @@ Threshold rules:
 - `0.4 ~ 0.7`: 疑似
 - `< 0.4`: 不存在
 
+## 真实复合验证
+
+真实采集验证集按标签组合放在 `data/real_test` 的子目录中。脚本会递归读取所有 CSV，并从目录名解析真实标签：
+
+```text
+data/real_test/
+  source_1_only/
+    000001.csv      # true_label = [1,0]
+  source_3_only/
+    000001.csv      # true_label = [0,1]
+  source_1_source_3_mix/
+    000001.csv      # true_label = [1,1]
+```
+
+批量推理命令：
+
+```bash
+python -m src.infer_folder \
+  --model outputs/checkpoints/best.pt \
+  --input-dir data/real_test \
+  --output outputs/reports/real_test_report.csv \
+  --threshold 0.5
+```
+
+脚本会自动读取 checkpoint 中的 `class_names`，复用训练配置中的信号长度、采样率和 STFT 参数，对每个 CSV 输出概率和阈值化后的多标签预测。逐样本报告保存为：
+
+```text
+outputs/reports/real_test_report.csv
+```
+
+字段包括 `file`、`group`、`true_label`、`pred_label`、`source_1_prob`、`source_3_prob`、`correct`。只有 `pred_label` 与 `true_label` 完全一致时，`correct` 才为 `true`。
+
+汇总指标保存为：
+
+```text
+outputs/reports/real_test_summary.json
+```
+
+汇总内容包括总样本数、完全匹配准确率、每个 group 的准确率，以及每个 source 的 precision / recall / f1。
+
 ## Current Limitations
 
 - The demo signals are synthetic and only prove the pipeline, not real-world accuracy.
