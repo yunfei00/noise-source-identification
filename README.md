@@ -165,7 +165,13 @@ data/real_test/
     000001.csv      # true_label = [0,1]
   source_1_source_3_mix/
     000001.csv      # true_label = [1,1]
+  unknown_source_5/
+    000001.csv      # true_label = [0,0]
 ```
+
+目录名只要以 `unknown` 开头（例如 `unknown_source_5`），就会被当作未知干扰源，真实标签强制设为全 0。以当前模型 `class_names = ["source_1", "source_3"]` 为例，`unknown_source_5` 的 `true_label = [0,0]`。评估时仍会输出每个已知 source 的概率，`pred_label` 由 `threshold=0.5`（或命令行指定阈值）决定；如果未知样本的 `pred_label` 也是 `[0,0]`，则 `correct=true`，如果被判成 `source_1` 或 `source_3`，则 `correct=false`。
+
+如果 `source_5` 没有参与训练，它不能作为 `source_5` 分类测试，只能作为未知干扰源测试。理想结果是模型对所有已知 source 都输出低概率，从而完全拒识该未知干扰源。
 
 批量推理命令：
 
@@ -191,7 +197,7 @@ outputs/reports/real_test_report.csv
 outputs/reports/real_test_summary.json
 ```
 
-汇总内容包括总样本数、完全匹配准确率、每个 group 的准确率，以及每个 source 的 precision / recall / f1。
+汇总内容包括总样本数、完全匹配准确率、每个 group 的准确率、每个 source 的 precision / recall / f1，以及 unknown 统计：unknown 样本数、unknown 完全拒识准确率、unknown 被误判为各 source 的次数、unknown 平均最大概率 `max_prob_mean`、unknown 最大概率 `max_prob_max`。
 
 ## Current Limitations
 

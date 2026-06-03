@@ -18,6 +18,7 @@ from src.train import resolve_device
 
 _REQUIRED_REPORT_CLASSES = ("source_1", "source_3")
 _SOURCE_NAME_RE = re.compile(r"source_\d+")
+_UNKNOWN_GROUP_PREFIX = "unknown"
 
 
 def _validate_class_names(class_names: Any) -> list[str]:
@@ -38,8 +39,16 @@ def _label_to_text(label: np.ndarray) -> str:
     return "[" + ",".join(str(int(value)) for value in label.tolist()) + "]"
 
 
+def is_unknown_group(group: str) -> bool:
+    """Return whether a real-test group should be treated as an unknown source."""
+    return group.startswith(_UNKNOWN_GROUP_PREFIX)
+
+
 def parse_true_label(group: str, class_names: list[str]) -> np.ndarray:
     """Parse a real-test group directory name into a multi-label target vector."""
+    if is_unknown_group(group):
+        return np.zeros(len(class_names), dtype=np.int32)
+
     source_names = set(_SOURCE_NAME_RE.findall(group))
     if not source_names:
         raise ValueError(
@@ -111,10 +120,48 @@ def infer_csv_probabilities(
     return probabilities.astype(np.float32, copy=False)
 
 
+def build_unknown_summary(
+    rows: list[dict[str, Any]],
+    preds: np.ndarray,
+    probabilities: np.ndarray,
+    class_names: list[str],
+) -> dict[str, Any]:
+    """Build rejection metrics for real-test groups whose names start with unknown."""
+    unknown_indices = [
+        index for index, row in enumerate(rows) if is_unknown_group(str(row["group"]))
+    ]
+    num_unknown = len(unknown_indices)
+    if not num_unknown:
+        return {
+            "num_samples": 0,
+            "full_rejection_accuracy": 0.0,
+            "misclassified_as_source_counts": {class_name: 0 for class_name in class_names},
+            "max_prob_mean": 0.0,
+            "max_prob_max": 0.0,
+        }
+
+    unknown_preds = preds[unknown_indices]
+    unknown_probabilities = probabilities[unknown_indices]
+    rejected = np.all(unknown_preds == 0, axis=1)
+    max_probabilities = np.max(unknown_probabilities, axis=1)
+
+    return {
+        "num_samples": num_unknown,
+        "full_rejection_accuracy": float(rejected.mean()),
+        "misclassified_as_source_counts": {
+            class_name: int(unknown_preds[:, class_index].sum())
+            for class_index, class_name in enumerate(class_names)
+        },
+        "max_prob_mean": float(max_probabilities.mean()),
+        "max_prob_max": float(max_probabilities.max()),
+    }
+
+
 def build_summary(
     rows: list[dict[str, Any]],
     targets: np.ndarray,
     preds: np.ndarray,
+    probabilities: np.ndarray,
     class_names: list[str],
     threshold: float,
 ) -> dict[str, Any]:
@@ -154,6 +201,7 @@ def build_summary(
         "exact_match_accuracy": float(exact_matches.mean()) if total_samples else 0.0,
         "group_accuracy": group_accuracy,
         "per_source": per_source,
+        "unknown": build_unknown_summary(rows, preds, probabilities, class_names),
     }
 
 
@@ -192,6 +240,16 @@ def print_summary(summary: dict[str, Any]) -> None:
     print("\ngroup accuracy:")
     for group, metrics in summary["group_accuracy"].items():
         print(f"  {group}: accuracy={metrics['accuracy']:.4f} samples={metrics['num_samples']}")
+    unknown = summary.get("unknown", {})
+    print("\nunknown rejection:")
+    print(f"  samples={unknown.get('num_samples', 0)}")
+    print(f"  full_rejection_accuracy={unknown.get('full_rejection_accuracy', 0.0):.4f}")
+    print(f"  max_prob_mean={unknown.get('max_prob_mean', 0.0):.4f}")
+    print(f"  max_prob_max={unknown.get('max_prob_max', 0.0):.4f}")
+    print("  misclassified_as_source_counts:")
+    for source_name, count in unknown.get("misclassified_as_source_counts", {}).items():
+        print(f"    {source_name}: {count}")
+
     print("\nper-source metrics:")
     print(f"{'source':<16} {'precision':>10} {'recall':>10} {'f1':>10} {'support':>10}")
     for source_name, metrics in summary["per_source"].items():
@@ -224,6 +282,7 @@ def infer_folder(
     rows: list[dict[str, Any]] = []
     targets: list[np.ndarray] = []
     preds: list[np.ndarray] = []
+    probabilities_by_file: list[np.ndarray] = []
 
     for csv_path in csv_files:
         group = csv_path.parent.name
@@ -245,10 +304,14 @@ def infer_folder(
         )
         targets.append(true_label)
         preds.append(pred_label)
+        probabilities_by_file.append(probabilities)
 
     target_array = np.vstack(targets).astype(np.int32)
     pred_array = np.vstack(preds).astype(np.int32)
-    summary = build_summary(rows, target_array, pred_array, class_names, threshold)
+    probability_array = np.vstack(probabilities_by_file).astype(np.float32)
+    summary = build_summary(
+        rows, target_array, pred_array, probability_array, class_names, threshold
+    )
     summary.update(
         {
             "model": str(model_path),
