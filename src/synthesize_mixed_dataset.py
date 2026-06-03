@@ -256,6 +256,12 @@ def synthesize_dataset(config: dict) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Synthesize multi-label mixed noise samples.")
     parser.add_argument("--config", type=Path, default=Path("configs/train.yaml"), help="Path to YAML config.")
+    parser.add_argument(
+        "--mode",
+        choices=("balanced_multilabel",),
+        default="balanced_multilabel",
+        help="Compatibility option; balanced multi-label generation is configured in YAML.",
+    )
     return parser.parse_args()
 
 
