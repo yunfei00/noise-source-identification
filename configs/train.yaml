@@ -5,7 +5,7 @@ data:
   mixed_dir: data/mixed
   sample_rate: 1000000
   signal_length: 4096
-  num_samples: 300
+  num_samples: 21000
   max_sources_per_mix: 3
   balanced_generation: true
   noise_std: 0.02
