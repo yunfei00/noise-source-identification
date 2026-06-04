@@ -12,9 +12,9 @@ import yaml
 from sklearn.metrics import f1_score
 from torch import nn
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-from torch.utils.data import DataLoader
+from torch.utils.data import ConcatDataset, DataLoader, Subset
 
-from src.dataset import MixedNoiseDataset
+from src.dataset import MixedNoiseDataset, RealNoiseDataset
 from src.model_cnn import NoiseCNN
 
 
@@ -59,10 +59,37 @@ def load_class_names(mixed_dir: str | Path) -> list[str]:
     return class_names
 
 
-def make_loader(config: dict, split: str, shuffle: bool) -> DataLoader:
+def make_loader(
+    config: dict,
+    split: str,
+    shuffle: bool,
+    class_names: list[str] | None = None,
+) -> DataLoader:
     data_config = config.get("data", {})
     train_config = config.get("train", {})
-    dataset = MixedNoiseDataset(data_config.get("mixed_dir", "data/mixed"), split, config)
+    synthetic_dataset = MixedNoiseDataset(data_config.get("mixed_dir", "data/mixed"), split, config)
+    dataset = synthetic_dataset
+
+    real_train_config = config.get("real_train", {})
+    if split == "train" and bool(real_train_config.get("enabled", False)):
+        if class_names is None:
+            class_names = load_class_names(data_config.get("mixed_dir", "data/mixed"))
+        ratio = float(real_train_config.get("ratio", 0.2))
+        if not 0.0 < ratio < 1.0:
+            raise ValueError(f"real_train.ratio must be between 0 and 1, got {ratio}")
+        real_dataset = RealNoiseDataset(real_train_config.get("dir", "data/real_train"), class_names, config)
+        target_real_count = max(1, int(round(len(synthetic_dataset) * ratio / (1.0 - ratio))))
+        rng = np.random.default_rng(int(config.get("seed", 42)))
+        if target_real_count <= len(real_dataset):
+            real_indices = rng.choice(len(real_dataset), size=target_real_count, replace=False).tolist()
+        else:
+            real_indices = rng.choice(len(real_dataset), size=target_real_count, replace=True).tolist()
+        dataset = ConcatDataset([synthetic_dataset, Subset(real_dataset, real_indices)])
+        print(
+            f"real_train enabled: synthetic={len(synthetic_dataset)} "
+            f"real_selected={target_real_count} ratio≈{target_real_count / len(dataset):.3f}"
+        )
+
     return DataLoader(
         dataset,
         batch_size=int(train_config.get("batch_size", 32)),
@@ -193,8 +220,8 @@ def train(config: dict) -> None:
     report_dir = Path(paths_config.get("report_dir", "outputs/reports"))
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    train_loader = make_loader(config, "train", shuffle=True)
-    val_loader = make_loader(config, "val", shuffle=False)
+    train_loader = make_loader(config, "train", shuffle=True, class_names=class_names)
+    val_loader = make_loader(config, "val", shuffle=False, class_names=class_names)
 
     model = NoiseCNN(num_classes=len(class_names)).to(device)
     criterion = nn.BCEWithLogitsLoss()

@@ -118,6 +118,50 @@ def relative_path_string(path: Path) -> str:
     return relative_path.as_posix()
 
 
+def _float_pair(config: dict, key: str, default: tuple[float, float]) -> tuple[float, float]:
+    value = config.get(key, default)
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise ValueError(f"augmentation.{key} must contain exactly two numbers")
+    low, high = float(value[0]), float(value[1])
+    if low > high:
+        raise ValueError(f"augmentation.{key} low value must be <= high value")
+    return low, high
+
+
+def scan_background_noise_files(config: dict) -> list[Path]:
+    augmentation_config = config.get("augmentation", {})
+    background_dir = Path(augmentation_config.get("background_noise_dir", "data/unknown/background_noise"))
+    if not bool(augmentation_config.get("background_noise_enabled", False)) or not background_dir.exists():
+        return []
+    if not background_dir.is_dir():
+        raise ValueError(f"background_noise_dir must be a directory: {background_dir}")
+    return sorted(path for path in background_dir.rglob("*.csv") if path.is_file())
+
+
+def apply_mix_normalization(signal: np.ndarray, mode: str) -> np.ndarray:
+    signal = np.asarray(signal, dtype=np.float32)
+    if mode == "none":
+        return signal.astype(np.float32, copy=False)
+    if mode == "zscore":
+        return normalize_signal(signal)
+    if mode == "rms":
+        rms = float(np.sqrt(np.mean(np.square(signal)))) if signal.size else 0.0
+        if rms < 1e-8:
+            return signal.astype(np.float32, copy=False)
+        return (signal / rms).astype(np.float32, copy=False)
+    raise ValueError(f"Unsupported augmentation.mix_normalization: {mode}")
+
+
+def add_snr_noise(signal: np.ndarray, snr_db_range: tuple[float, float], rng: np.random.Generator) -> np.ndarray:
+    signal_power = float(np.mean(np.square(signal)))
+    if signal_power < 1e-12:
+        return signal
+    snr_db = float(rng.uniform(snr_db_range[0], snr_db_range[1]))
+    noise_power = signal_power / (10.0 ** (snr_db / 10.0))
+    noise = rng.normal(0.0, np.sqrt(noise_power), size=signal.shape).astype(np.float32)
+    return (signal + noise).astype(np.float32, copy=False)
+
+
 def make_mixed_sample(
     class_names: list[str],
     files_by_class: dict[str, dict[str, list[Path]]],
@@ -126,9 +170,24 @@ def make_mixed_sample(
     noise_std: float,
     rng: np.random.Generator,
     selected_indices: np.ndarray | None = None,
-) -> tuple[np.ndarray, np.ndarray, list[dict]]:
+    augmentation_config: dict | None = None,
+    background_noise_files: list[Path] | None = None,
+) -> tuple[np.ndarray, np.ndarray, list[dict], dict]:
     if max_sources_per_mix <= 0:
         raise ValueError(f"max_sources_per_mix must be positive, got {max_sources_per_mix}")
+
+    augmentation_config = augmentation_config or {}
+    augmentation_enabled = bool(augmentation_config.get("enabled", False))
+    gain_range = _float_pair(augmentation_config, "gain_range", (0.1, 2.0)) if augmentation_enabled else (0.3, 1.5)
+    noise_snr_db_range = _float_pair(augmentation_config, "noise_snr_db_range", (10.0, 40.0))
+    dc_offset_range = _float_pair(augmentation_config, "dc_offset_range", (-0.05, 0.05))
+    background_scale_range = _float_pair(
+        augmentation_config, "background_noise_scale_range", (0.01, 0.2)
+    )
+    mix_normalization = str(augmentation_config.get("mix_normalization", "zscore" if not augmentation_enabled else "rms"))
+    source_dropout_prob = float(augmentation_config.get("source_dropout_prob", 0.0))
+    if not 0.0 <= source_dropout_prob < 1.0:
+        raise ValueError(f"source_dropout_prob must be in [0, 1), got {source_dropout_prob}")
 
     num_classes = len(class_names)
     if selected_indices is None:
@@ -146,8 +205,17 @@ def make_mixed_sample(
     mixed = np.zeros(signal_length, dtype=np.float32)
     label = np.zeros(num_classes, dtype=np.float32)
     sources: list[dict] = []
+    kept_source_indices: list[int] = []
 
     for class_index in selected_indices:
+        if source_dropout_prob > 0 and len(selected_indices) > 1 and rng.random() < source_dropout_prob:
+            continue
+        kept_source_indices.append(int(class_index))
+
+    if not kept_source_indices:
+        kept_source_indices = [int(selected_indices[int(rng.integers(0, len(selected_indices)))])]
+
+    for class_index in kept_source_indices:
         class_name = class_names[int(class_index)]
         files_by_frequency = files_by_class[class_name]
         frequencies = sorted(files_by_frequency)
@@ -155,12 +223,21 @@ def make_mixed_sample(
         frequency_files = files_by_frequency[frequency]
         csv_path = frequency_files[int(rng.integers(0, len(frequency_files)))]
         signal = read_signal_csv(csv_path)
-        signal = fix_length(signal, signal_length, random_crop=True, rng=rng)
+        signal = fix_length(
+            signal,
+            signal_length,
+            random_crop=bool(augmentation_config.get("random_crop", True)),
+            rng=rng,
+        )
         signal = normalize_signal(signal)
-        gain = float(rng.uniform(0.3, 1.5))
+        gain = float(rng.uniform(gain_range[0], gain_range[1]))
         signal = signal * gain
-        shift = int(rng.integers(0, signal_length))
-        signal = np.roll(signal, shift)
+        polarity = -1.0 if bool(augmentation_config.get("random_polarity_flip", False)) and rng.random() < 0.5 else 1.0
+        signal = signal * polarity
+        shift = 0
+        if bool(augmentation_config.get("random_time_shift", True)):
+            shift = int(rng.integers(0, signal_length))
+            signal = np.roll(signal, shift)
         mixed += signal.astype(np.float32, copy=False)
         label[int(class_index)] = 1.0
         sources.append(
@@ -169,15 +246,35 @@ def make_mixed_sample(
                 "frequency": frequency,
                 "file": relative_path_string(csv_path),
                 "gain": gain,
+                "polarity": polarity,
                 "shift": shift,
             }
         )
 
-    if noise_std > 0:
+    augmentations: dict = {"mix_normalization": mix_normalization}
+    if augmentation_enabled and bool(augmentation_config.get("background_noise_enabled", False)) and background_noise_files:
+        background_path = background_noise_files[int(rng.integers(0, len(background_noise_files)))]
+        background = read_signal_csv(background_path)
+        background = fix_length(background, signal_length, random_crop=True, rng=rng)
+        background = normalize_signal(background)
+        background_scale = float(rng.uniform(background_scale_range[0], background_scale_range[1]))
+        mixed += background.astype(np.float32, copy=False) * background_scale
+        augmentations["background_noise"] = {
+            "file": relative_path_string(background_path),
+            "scale": background_scale,
+        }
+
+    if augmentation_enabled:
+        if bool(augmentation_config.get("random_dc_offset", False)):
+            dc_offset = float(rng.uniform(dc_offset_range[0], dc_offset_range[1]))
+            mixed += dc_offset
+            augmentations["dc_offset"] = dc_offset
+        mixed = add_snr_noise(mixed, noise_snr_db_range, rng)
+        augmentations["snr_db_range"] = list(noise_snr_db_range)
+    elif noise_std > 0:
         mixed += rng.normal(0.0, noise_std, size=signal_length).astype(np.float32)
 
-    return normalize_signal(mixed), label, sources
-
+    return apply_mix_normalization(mixed, mix_normalization), label, sources, augmentations
 
 def make_balanced_multilabel_plan(
     num_samples: int,
@@ -220,6 +317,7 @@ def synthesize_dataset(config: dict) -> None:
     balanced_generation = bool(data_config.get("balanced_generation", False))
     noise_std = float(data_config.get("noise_std", 0.02))
     seed = int(config.get("seed", 42))
+    augmentation_config = config.get("augmentation", {})
 
     class_names, files_by_class = scan_single_source_files(single_dir)
     counts = split_counts(
@@ -230,6 +328,9 @@ def synthesize_dataset(config: dict) -> None:
     output_root = prepare_output_dirs(mixed_dir)
 
     rng = np.random.default_rng(seed)
+    background_noise_files = scan_background_noise_files(config)
+    if bool(augmentation_config.get("background_noise_enabled", False)) and not background_noise_files:
+        print("warning: background_noise_enabled is true but no CSV files were found under data/unknown/background_noise")
     if balanced_generation and max_sources_per_mix < 1:
         raise ValueError("balanced_generation requires max_sources_per_mix >= 1")
 
@@ -245,7 +346,7 @@ def synthesize_dataset(config: dict) -> None:
         )
         for index in tqdm(range(count), desc=f"synthesizing {split}"):
             sample_id = f"mixed_{index:06d}"
-            x, y, sources = make_mixed_sample(
+            x, y, sources, augmentations = make_mixed_sample(
                 class_names,
                 files_by_class,
                 signal_length,
@@ -253,6 +354,8 @@ def synthesize_dataset(config: dict) -> None:
                 noise_std,
                 rng,
                 selected_indices=None if balanced_plan is None else balanced_plan[index],
+                augmentation_config=augmentation_config,
+                background_noise_files=background_noise_files,
             )
             np.save(output_root / split / "x" / f"{sample_id}.npy", x)
             np.save(output_root / split / "y" / f"{sample_id}.npy", y)
@@ -260,6 +363,7 @@ def synthesize_dataset(config: dict) -> None:
                 "sample_id": sample_id,
                 "sources": sources,
                 "label": y.astype(int).tolist(),
+                "augmentations": augmentations,
             }
             metadata_path = output_root / split / "metadata" / f"{sample_id}.json"
             with metadata_path.open("w", encoding="utf-8") as handle:
