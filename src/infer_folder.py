@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import re
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +18,7 @@ from src.model_cnn import NoiseCNN
 from src.train import resolve_device
 
 _SOURCE_NAME_RE = re.compile(r"source_\d+")
-_UNKNOWN_GROUP_PREFIX = "unknown"
+_UNKNOWN_GROUP_PREFIXES = ("unknown", "background")
 
 
 def _validate_class_names(class_names: Any) -> list[str]:
@@ -28,17 +29,17 @@ def _validate_class_names(class_names: Any) -> list[str]:
     return class_names
 
 
-def _label_to_text(label: np.ndarray) -> str:
+def label_to_text(label: np.ndarray) -> str:
     return "[" + ",".join(str(int(value)) for value in label.tolist()) + "]"
 
 
 def is_unknown_group(group: str) -> bool:
-    """Return whether a real-test group should be treated as an unknown source."""
-    return group.startswith(_UNKNOWN_GROUP_PREFIX)
+    """Return whether a real-data group should be treated as an unknown source."""
+    return group.startswith(_UNKNOWN_GROUP_PREFIXES)
 
 
 def parse_true_label(group: str, class_names: list[str]) -> np.ndarray:
-    """Parse a real-test group directory name into a multi-label target vector."""
+    """Parse a first-level real-data group name into a multi-label target vector."""
     if is_unknown_group(group):
         return np.zeros(len(class_names), dtype=np.int32)
 
@@ -67,13 +68,28 @@ def parse_true_label(group: str, class_names: list[str]) -> np.ndarray:
     )
 
 
-def find_csv_files(input_dir: str | Path) -> list[Path]:
+def iter_group_csv_files(input_dir: str | Path) -> list[tuple[str, Path]]:
+    """Return (first-level group, csv path) pairs using recursive group scanning."""
     root = Path(input_dir)
     if not root.exists():
         raise FileNotFoundError(f"Input directory not found: {root}")
     if not root.is_dir():
         raise ValueError(f"Expected input directory, got: {root}")
-    return sorted(path for path in root.rglob("*.csv") if path.is_file())
+
+    grouped_files: list[tuple[str, Path]] = []
+    group_dirs = sorted((path for path in root.iterdir() if path.is_dir()), key=lambda path: path.name)
+    for group_dir in group_dirs:
+        csv_files = sorted(path for path in group_dir.rglob("*.csv") if path.is_file())
+        if not csv_files:
+            print(f"warning: no CSV files found recursively under group directory: {group_dir}")
+            continue
+        grouped_files.extend((group_dir.name, csv_path) for csv_path in csv_files)
+    return grouped_files
+
+
+def find_csv_files(input_dir: str | Path) -> list[Path]:
+    """Backward-compatible recursive CSV finder."""
+    return [csv_path for _, csv_path in iter_group_csv_files(input_dir)]
 
 
 def _feature_from_csv(csv_path: Path, data_config: dict, stft_config: dict) -> np.ndarray:
@@ -122,16 +138,23 @@ def infer_csv_probabilities(
     return probabilities.astype(np.float32, copy=False)
 
 
+def classify_prediction(probabilities: np.ndarray, threshold: float, unknown_threshold: float) -> tuple[np.ndarray, str]:
+    max_prob = float(np.max(probabilities)) if probabilities.size else 0.0
+    if max_prob < unknown_threshold:
+        return np.zeros_like(probabilities, dtype=np.int32), "unknown"
+    pred_label = (probabilities >= threshold).astype(np.int32)
+    if not np.any(pred_label):
+        return pred_label, "uncertain"
+    return pred_label, "known"
+
+
 def build_unknown_summary(
     rows: list[dict[str, Any]],
     preds: np.ndarray,
     probabilities: np.ndarray,
     class_names: list[str],
 ) -> dict[str, Any]:
-    """Build rejection metrics for real-test groups whose names start with unknown."""
-    unknown_indices = [
-        index for index, row in enumerate(rows) if is_unknown_group(str(row["group"]))
-    ]
+    unknown_indices = [index for index, row in enumerate(rows) if is_unknown_group(str(row["group"]))]
     num_unknown = len(unknown_indices)
     if not num_unknown:
         return {
@@ -159,6 +182,14 @@ def build_unknown_summary(
     }
 
 
+def _group_bucket(group: str) -> str:
+    if group in {"source_1_only", "source_3_only", "source_5_only"}:
+        return group
+    if group.endswith("_mix"):
+        return "mix"
+    return group
+
+
 def build_summary(
     rows: list[dict[str, Any]],
     targets: np.ndarray,
@@ -166,6 +197,7 @@ def build_summary(
     probabilities: np.ndarray,
     class_names: list[str],
     threshold: float,
+    unknown_threshold: float,
 ) -> dict[str, Any]:
     total_samples = len(rows)
     exact_matches = np.all(preds == targets, axis=1) if total_samples else np.asarray([], dtype=bool)
@@ -176,13 +208,19 @@ def build_summary(
         zero_division=0,
     )
 
-    groups = sorted({row["group"] for row in rows})
-    group_accuracy = {}
+    groups = sorted({str(row["group"]) for row in rows})
+    group_accuracy: dict[str, dict[str, float | int]] = {}
+    group_probability_means: dict[str, dict[str, float]] = {}
     for group in groups:
-        group_matches = [bool(row["correct"]) for row in rows if row["group"] == group]
+        indices = [index for index, row in enumerate(rows) if row["group"] == group]
+        group_matches = exact_matches[indices] if len(indices) else np.asarray([], dtype=bool)
         group_accuracy[group] = {
-            "num_samples": len(group_matches),
-            "accuracy": float(sum(group_matches) / len(group_matches)) if group_matches else 0.0,
+            "num_samples": len(indices),
+            "accuracy": float(group_matches.mean()) if len(indices) else 0.0,
+        }
+        group_probability_means[group] = {
+            f"{class_name}_prob_mean": float(probabilities[indices, class_index].mean()) if len(indices) else 0.0
+            for class_index, class_name in enumerate(class_names)
         }
 
     per_source = {
@@ -197,12 +235,26 @@ def build_summary(
         )
     }
 
+    misclassification_counters: dict[str, Counter[str]] = defaultdict(Counter)
+    for row in rows:
+        bucket = _group_bucket(str(row["group"]))
+        if bucket in {"source_1_only", "source_3_only", "source_5_only", "mix"}:
+            misclassification_counters[bucket][str(row["pred_label"])] += 1
+    misclassification_stats = {
+        bucket: dict(counter) for bucket, counter in sorted(misclassification_counters.items())
+    }
+
+    exact_accuracy = float(exact_matches.mean()) if total_samples else 0.0
     return {
         "threshold": float(threshold),
+        "unknown_threshold": float(unknown_threshold),
         "num_samples": total_samples,
-        "exact_match_accuracy": float(exact_matches.mean()) if total_samples else 0.0,
+        "exact_match_accuracy": exact_accuracy,
+        "overall_exact_match_accuracy": exact_accuracy,
         "group_accuracy": group_accuracy,
         "per_source": per_source,
+        "group_probability_means": group_probability_means,
+        "misclassification_stats": misclassification_stats,
         "unknown": build_unknown_summary(rows, preds, probabilities, class_names),
     }
 
@@ -211,7 +263,7 @@ def write_report_csv(rows: list[dict[str, Any]], output_path: str | Path) -> Non
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     probability_fields = [
-        fieldname for fieldname in rows[0] if fieldname.endswith("_prob")
+        fieldname for fieldname in rows[0] if fieldname.endswith("_prob") and fieldname != "max_prob"
     ] if rows else []
     fieldnames = [
         "file",
@@ -219,6 +271,8 @@ def write_report_csv(rows: list[dict[str, Any]], output_path: str | Path) -> Non
         "true_label",
         "pred_label",
         *sorted(set(probability_fields)),
+        "max_prob",
+        "result_type",
         "correct",
     ]
     with path.open("w", encoding="utf-8", newline="") as handle:
@@ -240,10 +294,17 @@ def write_summary_json(summary: dict[str, Any], output_path: str | Path) -> None
 
 def print_summary(summary: dict[str, Any]) -> None:
     print(f"total_samples={summary['num_samples']}")
-    print(f"exact_match_accuracy={summary['exact_match_accuracy']:.4f}")
+    print(f"overall_exact_match_accuracy={summary['overall_exact_match_accuracy']:.4f}")
     print("\ngroup accuracy:")
     for group, metrics in summary["group_accuracy"].items():
         print(f"  {group}: accuracy={metrics['accuracy']:.4f} samples={metrics['num_samples']}")
+    print("\ngroup probability means:")
+    for group, metrics in summary["group_probability_means"].items():
+        joined = " ".join(f"{key}={value:.4f}" for key, value in metrics.items())
+        print(f"  {group}: {joined}")
+    print("\nmisclassification stats:")
+    for group, counts in summary["misclassification_stats"].items():
+        print(f"  {group}: {counts}")
     unknown = summary.get("unknown", {})
     print("\nunknown rejection:")
     print(f"  samples={unknown.get('num_samples', 0)}")
@@ -272,13 +333,14 @@ def infer_folder(
     output_path: str | Path,
     threshold: float = 0.5,
     device_name: str = "auto",
+    unknown_threshold: float = 0.35,
 ) -> dict[str, Any]:
     device = resolve_device(device_name)
     model, class_names, config = load_model_for_inference(model_path, device)
 
-    csv_files = find_csv_files(input_dir)
-    if not csv_files:
-        raise ValueError(f"No CSV files found under input directory: {input_dir}")
+    grouped_csv_files = iter_group_csv_files(input_dir)
+    if not grouped_csv_files:
+        raise ValueError(f"No CSV files found under first-level group directories: {input_dir}")
 
     root = Path(input_dir)
     rows: list[dict[str, Any]] = []
@@ -286,18 +348,19 @@ def infer_folder(
     preds: list[np.ndarray] = []
     probabilities_by_file: list[np.ndarray] = []
 
-    for csv_path in csv_files:
-        group = csv_path.parent.name
+    for group, csv_path in grouped_csv_files:
         true_label = parse_true_label(group, class_names)
         probabilities = infer_csv_probabilities(model, csv_path, config, device)
-        pred_label = (probabilities >= threshold).astype(np.int32)
+        pred_label, result_type = classify_prediction(probabilities, threshold, unknown_threshold)
         correct = bool(np.array_equal(pred_label, true_label))
 
         row = {
-            "file": str(csv_path.relative_to(root)),
+            "file": csv_path.relative_to(root).as_posix(),
             "group": group,
-            "true_label": _label_to_text(true_label),
-            "pred_label": _label_to_text(pred_label),
+            "true_label": label_to_text(true_label),
+            "pred_label": label_to_text(pred_label),
+            "max_prob": f"{float(np.max(probabilities)):.6f}",
+            "result_type": result_type,
             "correct": correct,
         }
         row.update(
@@ -315,20 +378,20 @@ def infer_folder(
     pred_array = np.vstack(preds).astype(np.int32)
     probability_array = np.vstack(probabilities_by_file).astype(np.float32)
     summary = build_summary(
-        rows, target_array, pred_array, probability_array, class_names, threshold
+        rows, target_array, pred_array, probability_array, class_names, threshold, unknown_threshold
     )
+    summary_path = Path(output_path).with_name("real_test_summary.json")
     summary.update(
         {
             "model": str(model_path),
             "input_dir": str(input_dir),
             "output": str(output_path),
-            "summary_output": str(Path(output_path).with_name("real_test_summary.json")),
+            "summary_output": str(summary_path),
             "class_names": class_names,
         }
     )
 
     write_report_csv(rows, output_path)
-    summary_path = Path(output_path).with_name("real_test_summary.json")
     write_summary_json(summary, summary_path)
 
     print(f"device={device}")
@@ -349,15 +412,33 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Root directory containing real-test group folders.",
     )
-    parser.add_argument("--output", type=Path, required=True, help="Path to output CSV report.")
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("outputs/reports/real_test_report.csv"),
+        help="Path to output CSV report.",
+    )
     parser.add_argument("--threshold", type=float, default=0.5, help="Multi-label decision threshold.")
+    parser.add_argument(
+        "--unknown-threshold",
+        type=float,
+        default=0.35,
+        help="Classify samples below this max probability as unknown.",
+    )
     parser.add_argument("--device", default="auto", help="Device: auto, cpu, or cuda.")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    infer_folder(args.model, args.input_dir, args.output, args.threshold, args.device)
+    infer_folder(
+        args.model,
+        args.input_dir,
+        args.output,
+        args.threshold,
+        args.device,
+        args.unknown_threshold,
+    )
 
 
 if __name__ == "__main__":

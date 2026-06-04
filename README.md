@@ -205,3 +205,138 @@ outputs/reports/real_test_summary.json
 - Mixed samples use linear summation, random gain, random roll shift, and small Gaussian noise.
 - STFT shape is fixed by padding/cropping, so extreme signal lengths or sampling rates may need config tuning.
 - The CNN is intentionally lightweight and should be treated as a baseline model.
+
+## Real Data Domain-Gap Workflow
+
+### Recursive real-test directory support
+
+`src.infer_folder` treats each first-level directory under `data/real_test` as the true group label and now scans CSV files recursively inside that group with `group_dir.rglob("*.csv")`. Nested directories such as `600.000MHz`, `700.000MHz`, or `group_001` are only operating-condition/frequency folders; they are not used as labels.
+
+Example supported layout:
+
+```text
+data/real_test/
+  source_1_only/
+    600.000MHz/000001.csv
+    700.000MHz/000001.csv
+  source_3_only/
+    600.000MHz/000001.csv
+  source_5_only/
+    600.000MHz/000001.csv
+  source_1_source_3_mix/
+    group_001/000001.csv
+```
+
+The report stores `file` paths relative to `--input-dir`, for example `source_1_only/600.000MHz/000001.csv`, while `group` remains `source_1_only`. Known labels are parsed only from that first-level group name:
+
+- `source_1_only` -> `[1,0,0]`
+- `source_3_only` -> `[0,1,0]`
+- `source_5_only` -> `[0,0,1]`
+- `source_1_source_3_mix` -> `[1,1,0]`
+- `source_1_source_5_mix` -> `[1,0,1]`
+- `source_3_source_5_mix` -> `[0,1,1]`
+- `source_1_source_3_source_5_mix` -> `[1,1,1]`
+- `unknown_xxx` and `background_xxx` -> all-zero unknown labels
+
+If a first-level group directory contains no recursive CSV files, the script prints a warning and skips that group.
+
+### Real-test error analysis outputs
+
+Running real-data inference writes:
+
+- `outputs/reports/real_test_report.csv`
+- `outputs/reports/real_test_summary.json`
+
+The CSV report includes `file`, `group`, `true_label`, `pred_label`, per-source probabilities, `max_prob`, `result_type`, and `correct`. `result_type` is:
+
+- `known`: at least one source probability is above `--threshold`
+- `unknown`: all probabilities are below `--unknown-threshold`
+- `uncertain`: the sample is not confidently unknown, but no source reached `--threshold`
+
+The JSON summary includes overall exact-match accuracy, per-group accuracy, per-source precision/recall/F1, per-group mean probabilities, and misclassification counts for `source_1_only`, `source_3_only`, `source_5_only`, and mix groups.
+
+### Why synthetic and real data can differ
+
+A model trained only on synthesized mixtures can perform well on synthetic test data but poorly on real captures when the synthetic pipeline is too idealized. Common causes include:
+
+- real sensors have different gain, amplitude scale, clipping, and baseline/DC offset;
+- real captures include background emissions and acquisition noise that are absent from synthetic data;
+- real source timing, phase/polarity, and frequency conditions can differ from the synthetic mixing assumptions;
+- normalizing every synthetic mix to the same distribution can erase amplitude and energy differences that still exist in real data.
+
+### Reducing domain gap with augmentation
+
+`configs/train.yaml` contains an `augmentation` section used by `src.synthesize_mixed_dataset`:
+
+```yaml
+augmentation:
+  enabled: true
+  gain_range: [0.1, 2.0]
+  noise_snr_db_range: [10, 40]
+  random_dc_offset: true
+  dc_offset_range: [-0.05, 0.05]
+  random_polarity_flip: true
+  random_time_shift: true
+  random_crop: true
+  background_noise_enabled: true
+  background_noise_scale_range: [0.01, 0.2]
+  mix_normalization: rms
+  source_dropout_prob: 0.0
+```
+
+This makes synthesized training examples less ideal by varying source gains, adding random SNR noise, adding DC offsets, randomly flipping polarity, randomly shifting/cropping signals, and optionally mixing in recursive background CSV files from `data/unknown/background_noise` without changing the source label. `mix_normalization: rms` avoids forcing every mixture into exactly the same z-score distribution; supported values are `none`, `zscore`, and `rms`.
+
+### Mixing a small real training set
+
+If real performance is still poor, collect a small labeled real training set under `data/real_train` using the same first-level group naming rules as `data/real_test`. Multi-level subdirectories are supported recursively:
+
+```text
+data/real_train/
+  source_1_only/condition_a/*.csv
+  source_3_only/condition_a/*.csv
+  source_5_only/condition_a/*.csv
+  source_1_source_3_mix/condition_a/*.csv
+```
+
+Enable real-data mixing in `configs/train.yaml`:
+
+```yaml
+real_train:
+  enabled: true
+  dir: data/real_train
+  ratio: 0.2
+```
+
+`ratio: 0.2` means the training loader samples approximately 20% real examples and 80% synthetic examples. Validation and test splits remain synthetic unless a later real-validation extension is added.
+
+### Recommended workflow
+
+1. Run recursive real-test inference:
+
+```bash
+python -m src.infer_folder --model outputs/checkpoints/best.pt --input-dir data/real_test --threshold 0.5 --unknown-threshold 0.35
+```
+
+2. Diagnose the synthetic/real feature gap:
+
+```bash
+python -m src.analyze_real_vs_synthetic --model outputs/checkpoints/best.pt --real-dir data/real_test --synthetic-split test
+```
+
+3. Enable augmentation, regenerate synthetic data, train, and evaluate:
+
+```bash
+rm -rf data/mixed
+python -m src.synthesize_mixed_dataset --config configs/train.yaml --mode balanced_multilabel
+python -m src.train --config configs/train.yaml
+python -m src.evaluate --model outputs/checkpoints/best.pt --split test
+python -m src.infer_folder --model outputs/checkpoints/best.pt --input-dir data/real_test --threshold 0.5 --unknown-threshold 0.35
+```
+
+4. If real performance is still poor, collect a small `data/real_train` set and set:
+
+```yaml
+real_train:
+  enabled: true
+  ratio: 0.2
+```

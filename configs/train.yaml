@@ -13,6 +13,25 @@ data:
   val_ratio: 0.1
   test_ratio: 0.1
 
+augmentation:
+  enabled: true
+  gain_range: [0.1, 2.0]
+  noise_snr_db_range: [10, 40]
+  random_dc_offset: true
+  dc_offset_range: [-0.05, 0.05]
+  random_polarity_flip: true
+  random_time_shift: true
+  random_crop: true
+  background_noise_enabled: true
+  background_noise_scale_range: [0.01, 0.2]
+  mix_normalization: rms
+  source_dropout_prob: 0.0
+
+real_train:
+  enabled: false
+  dir: data/real_train
+  ratio: 0.2
+
 stft:
   nperseg: 256
   noverlap: 128
