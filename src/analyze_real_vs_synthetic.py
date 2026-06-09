@@ -156,7 +156,7 @@ def analyze(model_path: str | Path, real_dir: str | Path, synthetic_split: str, 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Analyze real vs synthetic domain-gap feature statistics.")
     parser.add_argument("--model", type=Path, default=Path("outputs/checkpoints/best.pt"))
-    parser.add_argument("--real-dir", type=Path, default=Path("data/real_test"))
+    parser.add_argument("--real-dir", type=Path, default=Path("data/real_dataset"))
     parser.add_argument("--synthetic-split", choices=("train", "val", "test"), default="test")
     parser.add_argument("--output", type=Path, default=Path("outputs/reports/domain_gap_report.json"))
     return parser.parse_args()

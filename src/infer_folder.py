@@ -47,12 +47,12 @@ def parse_true_label(group: str, class_names: list[str]) -> np.ndarray:
     if not source_names:
         raise ValueError(
             f"Cannot parse true label from group '{group}'. Expected names like "
-            "source_1_only, source_3_only, source_1_source_5_mix, or "
+            "source_1, source_3, source_1_source_5_mix, or "
             "source_1_source_3_source_5_mix."
         )
-    if not (group.endswith("_only") or group.endswith("_mix")):
+    if group not in class_names and not group.endswith("_mix"):
         raise ValueError(
-            f"Cannot parse true label from group '{group}'. Group must end with _only or _mix."
+            f"Cannot parse true label from group '{group}'. Group must be a single source directory like source_1 or a combo group ending with _mix."
         )
 
     unknown_sources = sorted(source_names.difference(class_names))
@@ -182,8 +182,8 @@ def build_unknown_summary(
     }
 
 
-def _group_bucket(group: str) -> str:
-    if group in {"source_1_only", "source_3_only", "source_5_only"}:
+def _group_bucket(group: str, class_names: list[str]) -> str:
+    if group in class_names:
         return group
     if group.endswith("_mix"):
         return "mix"
@@ -237,8 +237,8 @@ def build_summary(
 
     misclassification_counters: dict[str, Counter[str]] = defaultdict(Counter)
     for row in rows:
-        bucket = _group_bucket(str(row["group"]))
-        if bucket in {"source_1_only", "source_3_only", "source_5_only", "mix"}:
+        bucket = _group_bucket(str(row["group"]), class_names)
+        if bucket in {*class_names, "mix"}:
             misclassification_counters[bucket][str(row["pred_label"])] += 1
     misclassification_stats = {
         bucket: dict(counter) for bucket, counter in sorted(misclassification_counters.items())
@@ -380,7 +380,7 @@ def infer_folder(
     summary = build_summary(
         rows, target_array, pred_array, probability_array, class_names, threshold, unknown_threshold
     )
-    summary_path = Path(output_path).with_name("real_test_summary.json")
+    summary_path = Path(output_path).with_suffix(".summary.json")
     summary.update(
         {
             "model": str(model_path),
@@ -404,18 +404,18 @@ def infer_folder(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Batch infer real validation CSV folders.")
+    parser = argparse.ArgumentParser(description="Batch infer real dataset CSV folders.")
     parser.add_argument("--model", type=Path, required=True, help="Path to model checkpoint.")
     parser.add_argument(
         "--input-dir",
         type=Path,
         required=True,
-        help="Root directory containing real-test group folders.",
+        help="Root directory containing real dataset group folders.",
     )
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("outputs/reports/real_test_report.csv"),
+        default=Path("outputs/reports/infer_folder_report.csv"),
         help="Path to output CSV report.",
     )
     parser.add_argument("--threshold", type=float, default=0.5, help="Multi-label decision threshold.")

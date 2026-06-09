@@ -235,7 +235,7 @@ def evaluate(
     report_path: str | Path | None = None,
     real_split: str | None = None,
 ) -> dict:
-    """Evaluate a checkpoint on a synthesized split or a real_train split."""
+    """Evaluate a checkpoint on a synthesized split or a real dataset split."""
     device = resolve_device(device_name)
     checkpoint = load_checkpoint(model_path, map_location=device)
     class_names = checkpoint.get("class_names")
@@ -251,8 +251,6 @@ def evaluate(
     eval_split = split
     groups: list[str] | None = None
     condition_paths: list[str] | None = None
-    if split == "real_test" and requested_real_split is None:
-        requested_real_split = "test"
     if requested_real_split is not None:
         loader, groups, condition_paths = _real_loader_and_groups(config, class_names, requested_real_split)
         eval_split = f"real_{requested_real_split}"
@@ -299,7 +297,7 @@ def evaluate(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate a multi-label noise source classifier.")
     parser.add_argument("--model", type=Path, required=True, help="Path to model checkpoint.")
-    parser.add_argument("--split", choices=("train", "val", "test", "real_test"), default="test", help="Dataset split.")
+    parser.add_argument("--split", choices=("train", "val", "test"), default="test", help="Dataset split.")
     parser.add_argument("--real-split", choices=("train", "val", "test"), help="Evaluate a split from real_dataset_split.csv.")
     parser.add_argument("--device", default="auto", help="Device: auto, cpu, or cuda.")
     parser.add_argument("--report", type=Path, help="Report path (default: outputs/reports/eval_report.json).")
