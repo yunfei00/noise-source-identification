@@ -359,7 +359,9 @@ training_data:
 
 - `synthetic_only`: train and validate only with `data/mixed/train` and `data/mixed/val`.
 - `hybrid`: keep synthetic `data/mixed/train` / `data/mixed/val` and mix in recursive samples from `data/real_train`. The training loader uses `synthetic_ratio` / `real_ratio` as sampling weights. If `data/real_train` is empty, training prints a warning and falls back to synthetic-only data.
-- `real_only`: train, validate, and test only with `data/real_train` splits. This mode does not depend on `data/mixed`; if no real samples are found it fails with `real_only mode requires non-empty real_train dataset`.
+- `real_only`: train, validate, and test only with the real split built from recursive CSV scans of `data/single` and `data/real_train`. This mode does not depend on `data/mixed` and does not use `data.num_samples`; every real CSV discovered by the index is eligible for the train/validation/test split. If no real samples are found it fails with `real_only mode requires non-empty real dataset`.
+
+`data.num_samples` is only used to decide how many synthetic examples are generated for `synthetic_only` and for the synthetic portion of `hybrid`; it does not cap, truncate, or otherwise affect `real_only` training.
 
 When real data is large enough, switch to:
 
@@ -540,7 +542,9 @@ Run training with:
 python -m src.train --config configs/train.yaml
 ```
 
-When `training_data.mode: real_only`, training no longer depends on `data/mixed`. If the real index or split CSV is missing, training builds it automatically from `data/single` and `data/real_train`. Samples are read lazily from CSV during training and transformed with the existing CSV reader, fixed-length preprocessing, and STFT feature extraction; 30,000+ CSV files are not loaded into memory at once. STFT caching remains optional and is disabled by default.
+When `training_data.mode: real_only`, training no longer depends on `data/mixed` and ignores `data.num_samples`; the real dataset size is fully determined by the recursive CSV scan of `data/single` plus `data/real_train`, so if the scan finds 25,200 CSV files, all 25,200 are split and used according to the configured real split ratios. In `real_only`, training rebuilds the real index and split from the current CSV files at startup, then reads samples lazily from CSV during training and transforms them with the existing CSV reader, fixed-length preprocessing, and STFT feature extraction; 30,000+ CSV files are not loaded into memory at once. STFT caching remains optional and is disabled by default.
+
+`data.num_samples` applies only to synthetic data generation (`synthetic_only` or the synthetic portion of `hybrid`) and never caps real-only training.
 
 ### Evaluate a real split
 

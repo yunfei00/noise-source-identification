@@ -119,6 +119,7 @@ def write_split(rows: list[dict[str, str]], output: str | Path, input_fieldnames
 
 
 def print_split_summary(rows: list[dict[str, str]]) -> None:
+    print(f"total_real_samples={len(rows)}")
     print(f"split samples={len(rows)}")
     print("split counts:")
     split_counts = Counter(row["split"] for row in rows)
