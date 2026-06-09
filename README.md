@@ -298,16 +298,18 @@ data/real_train/
   source_1_source_3_mix/condition_a/*.csv
 ```
 
-Enable real-data mixing in `configs/train.yaml`:
+Enable hybrid real-data mixing in `configs/train.yaml`:
 
 ```yaml
+training_data:
+  mode: hybrid
+  synthetic_ratio: 0.8
+  real_ratio: 0.2
 real_train:
-  enabled: true
   dir: data/real_train
-  ratio: 0.2
 ```
 
-`ratio: 0.2` means the training loader samples approximately 20% real examples and 80% synthetic examples. Validation and test splits remain synthetic unless a later real-validation extension is added.
+The training loader uses `synthetic_ratio` and `real_ratio` as weighted sampling targets. If `real_split.enabled: true`, real `split=train` samples are mixed into training and real `split=val` samples can participate in validation.
 
 ### Recommended workflow
 
@@ -336,7 +338,171 @@ python -m src.infer_folder --model outputs/checkpoints/best.pt --input-dir data/
 4. If real performance is still poor, collect a small `data/real_train` set and set:
 
 ```yaml
+training_data:
+  mode: hybrid
+  synthetic_ratio: 0.8
+  real_ratio: 0.2
 real_train:
-  enabled: true
-  ratio: 0.2
+  dir: data/real_train
 ```
+
+## Large-Scale Real Training Data
+
+The training pipeline supports three data modes through `configs/train.yaml`:
+
+```yaml
+training_data:
+  mode: hybrid
+  synthetic_ratio: 0.3
+  real_ratio: 0.7
+```
+
+- `synthetic_only`: train and validate only with `data/mixed/train` and `data/mixed/val`.
+- `hybrid`: keep synthetic `data/mixed/train` / `data/mixed/val` and mix in recursive samples from `data/real_train`. The training loader uses `synthetic_ratio` / `real_ratio` as sampling weights. If `data/real_train` is empty, training prints a warning and falls back to synthetic-only data.
+- `real_only`: train, validate, and test only with `data/real_train` splits. This mode does not depend on `data/mixed`; if no real samples are found it fails with `real_only mode requires non-empty real_train dataset`.
+
+When real data is large enough, switch to:
+
+```yaml
+training_data:
+  mode: real_only
+  synthetic_ratio: 0.0
+  real_ratio: 1.0
+```
+
+### Real data directory structure
+
+`data/real_train` is organized by first-level label groups. All directories under a group are operating-condition metadata, such as frequency, source strength, and collection batch. They are scanned recursively but are not used for label parsing.
+
+```text
+data/real_train/
+  source_1_only/
+    600.000MHz/
+      strong/
+        000001.csv
+      weak/
+        000002.csv
+
+  source_1_source_3_mix/
+    600.000MHz/
+      source1_strong_source3_weak/
+        000001.csv
+      source1_weak_source3_strong/
+        000002.csv
+      same_level/
+        000003.csv
+
+  source_1_source_3_source_5_mix/
+    700.000MHz/
+      batch_001/
+        000001.csv
+```
+
+For a file such as:
+
+```text
+data/real_train/source_1_source_3_mix/600.000MHz/source1_strong_source3_weak/000001.csv
+```
+
+- `group = source_1_source_3_mix`
+- `label = [1,1,0]` when `class_names = [source_1, source_3, source_5]`
+- `condition_path = 600.000MHz/source1_strong_source3_weak`
+- `file = source_1_source_3_mix/600.000MHz/source1_strong_source3_weak/000001.csv`
+
+Strong/weak relationships should be placed under the first-level group, for example:
+
+```text
+source_1_source_3_mix/600.000MHz/source1_strong_source3_weak/
+source_1_source_3_mix/600.000MHz/source1_weak_source3_strong/
+source_1_source_3_mix/600.000MHz/same_level/
+```
+
+### Real index and split files
+
+Build a recursive real-data index:
+
+```bash
+python -m src.build_real_index --dir data/real_train --output outputs/reports/real_train_index.csv
+```
+
+The index is saved to `outputs/reports/real_train_index.csv` with fields:
+
+```text
+file, group, condition_path, label, source_1, source_3, source_5
+```
+
+The command also writes `outputs/reports/real_train_split.csv` by default. It prints sample counts for each first-level `group` and each label combination. Unparseable groups are skipped with a warning; empty directories warn but do not crash.
+
+Automatic splitting is controlled by:
+
+```yaml
+real_split:
+  enabled: true
+  train_ratio: 0.7
+  val_ratio: 0.15
+  test_ratio: 0.15
+  seed: 42
+  split_by_group: true
+```
+
+Splitting is performed within each group so each source combination is represented across train/val/test whenever there are enough samples. Very small groups emit a warning because not every split can receive that group.
+
+### Real-only training workflow
+
+1. Build the recursive real index and split:
+
+   ```bash
+   python -m src.build_real_index --dir data/real_train --output outputs/reports/real_train_index.csv
+   ```
+
+2. Inspect the generated split file:
+
+   ```text
+   outputs/reports/real_train_split.csv
+   ```
+
+3. Set the training mode in `configs/train.yaml`:
+
+   ```yaml
+   training_data:
+     mode: real_only
+     synthetic_ratio: 0.0
+     real_ratio: 1.0
+   ```
+
+4. Train:
+
+   ```bash
+   python -m src.train --config configs/train.yaml
+   ```
+
+5. Evaluate the real held-out test split:
+
+   ```bash
+   python -m src.evaluate --model outputs/checkpoints/best.pt --real-split test
+   ```
+
+   Equivalent shorthand:
+
+   ```bash
+   python -m src.evaluate --model outputs/checkpoints/best.pt --split real_test
+   ```
+
+6. Validate an external `data/real_test` folder:
+
+   ```bash
+   python -m src.infer_folder --model outputs/checkpoints/best.pt --input-dir data/real_test --threshold 0.5 --unknown-threshold 0.35
+   ```
+
+### STFT cache for large CSV datasets
+
+Real CSV samples are loaded lazily during training, so tens of thousands of files are not loaded into memory at once. To avoid recomputing STFT features every epoch, enable the optional cache:
+
+```yaml
+cache:
+  enabled: true
+  dir: data/cache_stft
+  rebuild: false
+```
+
+With caching enabled, the first read of each CSV computes its STFT feature and stores a `.npy` cache file. Later reads reuse that cache. The cache key is based on the real file path plus the signal/STFT configuration hash.
