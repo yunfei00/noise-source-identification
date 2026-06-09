@@ -108,7 +108,7 @@ MixedNoiseDataset = SyntheticNpyDataset
 
 
 class RealCsvDataset(SyntheticNpyDataset):
-    """Lazy real CSV dataset backed by real_train_split.csv or a generated index."""
+    """Lazy real CSV dataset backed by a unified real_dataset_split.csv or generated index."""
 
     def __init__(
         self,
@@ -155,11 +155,15 @@ class RealCsvDataset(SyntheticNpyDataset):
                     raise ValueError(
                         f"Label length mismatch in {index_path}: {row['label']} vs class_names={self.class_names}"
                     )
+                path_value = Path(row["file"])
+                sample_path = path_value if path_value.exists() else self.root / path_value
                 samples.append(
                     {
-                        "path": self.root / row["file"],
+                        "path": sample_path,
                         "file": row["file"],
+                        "source_root": row.get("source_root", ""),
                         "group": row.get("group", ""),
+                        "condition_path": row.get("condition_path", ""),
                         "label": label,
                     }
                 )
@@ -182,7 +186,9 @@ class RealCsvDataset(SyntheticNpyDataset):
                     {
                         "path": csv_path,
                         "file": csv_path.relative_to(self.root).as_posix(),
+                        "source_root": "real_train",
                         "group": group_dir.name,
+                        "condition_path": csv_path.relative_to(group_dir).parent.as_posix() if csv_path.relative_to(group_dir).parent.as_posix() != "." else "",
                         "label": label,
                     }
                 )
