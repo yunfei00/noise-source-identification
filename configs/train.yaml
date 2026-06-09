@@ -1,5 +1,4 @@
 seed: 42
-
 data:
   single_dir: data/single
   mixed_dir: data/mixed
@@ -12,29 +11,31 @@ data:
   train_ratio: 0.8
   val_ratio: 0.1
   test_ratio: 0.1
-
 augmentation:
   enabled: true
-  gain_range: [0.1, 2.0]
-  noise_snr_db_range: [10, 40]
+  gain_range:
+  - 0.1
+  - 2.0
+  noise_snr_db_range:
+  - 10
+  - 40
   random_dc_offset: true
-  dc_offset_range: [-0.05, 0.05]
+  dc_offset_range:
+  - -0.05
+  - 0.05
   random_polarity_flip: true
   random_time_shift: true
   random_crop: true
   background_noise_enabled: true
-  background_noise_scale_range: [0.01, 0.2]
+  background_noise_scale_range:
+  - 0.01
+  - 0.2
   mix_normalization: rms
   source_dropout_prob: 0.0
-
 training_data:
-  mode: hybrid
-  synthetic_ratio: 0.3
-  real_ratio: 0.7
-
+  mode: real_only
 real_train:
   dir: data/real_train
-
 real_split:
   enabled: true
   train_ratio: 0.7
@@ -42,18 +43,15 @@ real_split:
   test_ratio: 0.15
   seed: 42
   split_by_group: true
-
 cache:
   enabled: false
   dir: data/cache_stft
   rebuild: false
-
 stft:
   nperseg: 256
   noverlap: 128
   target_freq_bins: 128
   target_time_bins: 64
-
 train:
   batch_size: 32
   epochs: 200
@@ -61,20 +59,23 @@ train:
   threshold: 0.5
   device: auto
   num_workers: 0
-
 early_stopping:
   enabled: true
   monitor: micro_f1
   mode: max
   patience: 15
   min_delta: 0.001
-
 scheduler:
   enabled: true
   type: ReduceLROnPlateau
   factor: 0.5
   patience: 5
-
 paths:
   checkpoint_dir: outputs/checkpoints
   report_dir: outputs/reports
+real_data:
+  enabled: true
+  index_file: outputs/reports/real_dataset_index.csv
+  split_file: outputs/reports/real_dataset_split.csv
+  include_single: true
+  include_real_train: true

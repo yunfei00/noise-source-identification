@@ -14,9 +14,12 @@ from torch import nn
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import ConcatDataset, DataLoader, WeightedRandomSampler
 
-from src.build_real_index import DEFAULT_CLASS_NAMES, scan_real_train, split_real_rows, write_index, write_split
+from src.build_real_index import build_real_index, discover_class_names
 from src.dataset import RealCsvDataset, SyntheticNpyDataset
 from src.model_cnn import NoiseCNN
+from src.split_real_dataset import split_real_dataset
+
+DEFAULT_CLASS_NAMES = ["source_1", "source_3", "source_5"]
 
 
 def load_config(path: str | Path) -> dict:
@@ -63,8 +66,10 @@ def load_class_names(
     prefer_config: bool = False,
 ) -> list[str]:
     configured = _configured_class_names(config)
+    single_dir = Path((config or {}).get("data", {}).get("single_dir", "data/single"))
+    single_class_names = discover_class_names(single_dir) if single_dir.exists() else []
     if prefer_config:
-        return configured or list(DEFAULT_CLASS_NAMES)
+        return configured or single_class_names or list(DEFAULT_CLASS_NAMES)
 
     class_names_path = Path(mixed_dir) / "class_names.json"
     if class_names_path.exists():
@@ -76,6 +81,8 @@ def load_class_names(
 
     if configured is not None:
         return configured
+    if single_class_names:
+        return single_class_names
     return list(DEFAULT_CLASS_NAMES)
 
 
@@ -97,30 +104,42 @@ def training_data_config(config: dict) -> tuple[str, float, float]:
 
 
 def prepare_real_split(config: dict, class_names: list[str]) -> Path | None:
-    real_config = config.get("real_train", {})
-    split_config = config.get("real_split", {})
-    if not bool(split_config.get("enabled", False)):
+    mode, _, _ = training_data_config(config)
+    real_data_config = config.get("real_data", {})
+    legacy_split_config = config.get("real_split", {})
+    enabled = bool(real_data_config.get("enabled", mode == "real_only" or legacy_split_config.get("enabled", False)))
+    if not enabled and mode != "real_only":
         return None
 
-    real_dir = Path(real_config.get("dir", "data/real_train"))
+    data_config = config.get("data", {})
     paths_config = config.get("paths", {})
     report_dir = Path(paths_config.get("report_dir", "outputs/reports"))
-    index_path = report_dir / "real_train_index.csv"
-    split_path = report_dir / "real_train_split.csv"
+    single_dir = Path(real_data_config.get("single_dir", data_config.get("single_dir", "data/single")))
+    real_train_dir = Path(real_data_config.get("real_train_dir", config.get("real_train", {}).get("dir", "data/real_train")))
+    index_path = Path(real_data_config.get("index_file", report_dir / "real_dataset_index.csv"))
+    split_path = Path(real_data_config.get("split_file", report_dir / "real_dataset_split.csv"))
 
-    rows = scan_real_train(real_dir, class_names)
-    write_index(rows, index_path)
-    split_rows = split_real_rows(
-        rows,
-        train_ratio=float(split_config.get("train_ratio", 0.7)),
-        val_ratio=float(split_config.get("val_ratio", 0.15)),
-        test_ratio=float(split_config.get("test_ratio", 0.15)),
-        seed=int(split_config.get("seed", config.get("seed", 42))),
-        split_by_group=bool(split_config.get("split_by_group", True)),
-    )
-    write_split(split_rows, split_path)
-    print(f"real_train_index={index_path} samples={len(rows)}")
-    print(f"real_train_split={split_path} samples={len(split_rows)}")
+    if not index_path.exists():
+        print(f"real dataset index not found; building {index_path}")
+        build_real_index(
+            single_dir=single_dir,
+            real_train_dir=real_train_dir,
+            output=index_path,
+            class_names=class_names,
+            include_single=bool(real_data_config.get("include_single", True)),
+            include_real_train=bool(real_data_config.get("include_real_train", True)),
+        )
+
+    if not split_path.exists():
+        print(f"real dataset split not found; building {split_path}")
+        split_real_dataset(
+            index=index_path,
+            output=split_path,
+            train_ratio=float(legacy_split_config.get("train_ratio", 0.7)),
+            val_ratio=float(legacy_split_config.get("val_ratio", 0.15)),
+            test_ratio=float(legacy_split_config.get("test_ratio", 0.15)),
+            seed=int(legacy_split_config.get("seed", config.get("seed", 42))),
+        )
     return split_path
 
 
@@ -139,8 +158,9 @@ def _try_real_dataset(
     class_names: list[str],
     split_path: Path | None = None,
 ) -> RealCsvDataset | None:
-    real_config = config.get("real_train", {})
-    real_dir = real_config.get("dir", "data/real_train")
+    real_data_config = config.get("real_data", {})
+    data_config = config.get("data", {})
+    real_dir = real_data_config.get("dataset_root", data_config.get("single_dir", "."))
     try:
         return RealCsvDataset(real_dir, class_names, config, split=split if split_path else None, index_path=split_path)
     except (FileNotFoundError, ValueError) as exc:

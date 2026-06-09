@@ -84,12 +84,20 @@ def label_to_text(label: np.ndarray) -> str:
     return "[" + ",".join(str(int(value)) for value in label.tolist()) + "]"
 
 
+def _ratio_from_condition(condition_path: str) -> str | None:
+    for part in Path(condition_path).parts:
+        if part.startswith("ratio_"):
+            return part
+    return None
+
+
 def compute_real_breakdowns(
     probs: np.ndarray,
     targets: np.ndarray,
     groups: list[str],
     class_names: list[str],
     threshold: float,
+    condition_paths: list[str] | None = None,
 ) -> dict:
     preds = (probs >= threshold).astype(np.int32)
     exact = np.all(preds == targets, axis=1)
@@ -129,11 +137,26 @@ def compute_real_breakdowns(
             class_names, precision, recall, f1, support
         )
     }
+    ratio_accuracy: dict[str, dict[str, float | int]] = {}
+    if condition_paths is not None:
+        ratio_indices: dict[str, list[int]] = defaultdict(list)
+        for index, condition_path in enumerate(condition_paths):
+            ratio = _ratio_from_condition(condition_path)
+            if ratio is not None:
+                ratio_indices[ratio].append(index)
+        ratio_accuracy = {
+            ratio: {
+                "num_samples": len(indices),
+                "accuracy": float(exact[indices].mean()) if indices else 0.0,
+            }
+            for ratio, indices in sorted(ratio_indices.items())
+        }
     return {
         "threshold": float(threshold),
         "group_accuracy": group_accuracy,
         "label_accuracy": label_accuracy,
         "per_source": per_source,
+        "ratio_accuracy": ratio_accuracy,
     }
 
 
@@ -176,14 +199,18 @@ def print_real_breakdowns(breakdowns: dict) -> None:
             f"{metrics['f1']:>10.4f} "
             f"{metrics['support']:>10d}"
         )
+    if breakdowns.get("ratio_accuracy"):
+        print("\nreal ratio accuracy:")
+        for ratio, metrics in breakdowns["ratio_accuracy"].items():
+            print(f"  {ratio}: accuracy={metrics['accuracy']:.4f} samples={metrics['num_samples']}")
 
 
-def _real_loader_and_groups(config: dict, class_names: list[str], real_split: str) -> tuple[DataLoader, list[str]]:
+def _real_loader_and_groups(config: dict, class_names: list[str], real_split: str) -> tuple[DataLoader, list[str], list[str]]:
     split_path = prepare_real_split(config, class_names)
     if split_path is None:
-        split_path = Path(config.get("paths", {}).get("report_dir", "outputs/reports")) / "real_train_split.csv"
+        split_path = Path(config.get("real_data", {}).get("split_file", Path(config.get("paths", {}).get("report_dir", "outputs/reports")) / "real_dataset_split.csv"))
     dataset = RealCsvDataset(
-        config.get("real_train", {}).get("dir", "data/real_train"),
+        config.get("real_data", {}).get("dataset_root", "."),
         class_names,
         config,
         split=real_split,
@@ -197,7 +224,8 @@ def _real_loader_and_groups(config: dict, class_names: list[str], real_split: st
         pin_memory=torch.cuda.is_available(),
     )
     groups = [str(sample["group"]) for sample in dataset.samples]
-    return loader, groups
+    condition_paths = [str(sample.get("condition_path", "")) for sample in dataset.samples]
+    return loader, groups, condition_paths
 
 
 def evaluate(
@@ -222,10 +250,11 @@ def evaluate(
     requested_real_split = real_split
     eval_split = split
     groups: list[str] | None = None
+    condition_paths: list[str] | None = None
     if split == "real_test" and requested_real_split is None:
         requested_real_split = "test"
     if requested_real_split is not None:
-        loader, groups = _real_loader_and_groups(config, class_names, requested_real_split)
+        loader, groups, condition_paths = _real_loader_and_groups(config, class_names, requested_real_split)
         eval_split = f"real_{requested_real_split}"
     else:
         loader = make_loader(config, split, shuffle=False, class_names=class_names)
@@ -240,7 +269,7 @@ def evaluate(
     threshold = float(config.get("train", {}).get("threshold", 0.5))
     real_breakdowns = None
     if groups is not None:
-        real_breakdowns = compute_real_breakdowns(probs, targets, groups, class_names, threshold)
+        real_breakdowns = compute_real_breakdowns(probs, targets, groups, class_names, threshold, condition_paths)
 
     output_path = Path(report_path or "outputs/reports/eval_report.json")
     report = {
@@ -271,7 +300,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate a multi-label noise source classifier.")
     parser.add_argument("--model", type=Path, required=True, help="Path to model checkpoint.")
     parser.add_argument("--split", choices=("train", "val", "test", "real_test"), default="test", help="Dataset split.")
-    parser.add_argument("--real-split", choices=("train", "val", "test"), help="Evaluate a split from real_train_split.csv.")
+    parser.add_argument("--real-split", choices=("train", "val", "test"), help="Evaluate a split from real_dataset_split.csv.")
     parser.add_argument("--device", default="auto", help="Device: auto, cpu, or cuda.")
     parser.add_argument("--report", type=Path, help="Report path (default: outputs/reports/eval_report.json).")
     return parser.parse_args()
