@@ -27,10 +27,26 @@ augmentation:
   mix_normalization: rms
   source_dropout_prob: 0.0
 
+training_data:
+  mode: hybrid
+  synthetic_ratio: 0.3
+  real_ratio: 0.7
+
 real_train:
-  enabled: false
   dir: data/real_train
-  ratio: 0.2
+
+real_split:
+  enabled: true
+  train_ratio: 0.7
+  val_ratio: 0.15
+  test_ratio: 0.15
+  seed: 42
+  split_by_group: true
+
+cache:
+  enabled: false
+  dir: data/cache_stft
+  rebuild: false
 
 stft:
   nperseg: 256

@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
 import torch
 from sklearn.metrics import f1_score, precision_recall_fscore_support
+from torch.utils.data import DataLoader
 
+from src.dataset import RealCsvDataset
 from src.infer import load_checkpoint
 from src.model_cnn import NoiseCNN
-from src.train import make_loader, resolve_device
+from src.train import make_loader, prepare_real_split, resolve_device
 
 DEFAULT_THRESHOLDS = (0.3, 0.4, 0.5, 0.6, 0.7)
 
@@ -77,6 +80,63 @@ def compute_metrics(
     return {"threshold": threshold, "per_class": per_class, "overall": overall}
 
 
+def label_to_text(label: np.ndarray) -> str:
+    return "[" + ",".join(str(int(value)) for value in label.tolist()) + "]"
+
+
+def compute_real_breakdowns(
+    probs: np.ndarray,
+    targets: np.ndarray,
+    groups: list[str],
+    class_names: list[str],
+    threshold: float,
+) -> dict:
+    preds = (probs >= threshold).astype(np.int32)
+    exact = np.all(preds == targets, axis=1)
+    group_accuracy: dict[str, dict[str, float | int]] = {}
+    for group in sorted(set(groups)):
+        indices = [index for index, value in enumerate(groups) if value == group]
+        group_accuracy[group] = {
+            "num_samples": len(indices),
+            "accuracy": float(exact[indices].mean()) if indices else 0.0,
+        }
+
+    label_indices: dict[str, list[int]] = defaultdict(list)
+    for index, target in enumerate(targets):
+        label_indices[label_to_text(target)].append(index)
+    label_accuracy = {
+        label: {
+            "num_samples": len(indices),
+            "accuracy": float(exact[indices].mean()) if indices else 0.0,
+        }
+        for label, indices in sorted(label_indices.items())
+    }
+
+    precision, recall, f1, support = precision_recall_fscore_support(
+        targets,
+        preds,
+        average=None,
+        zero_division=0,
+    )
+    per_source = {
+        class_name: {
+            "precision": float(class_precision),
+            "recall": float(class_recall),
+            "f1": float(class_f1),
+            "support": int(class_support),
+        }
+        for class_name, class_precision, class_recall, class_f1, class_support in zip(
+            class_names, precision, recall, f1, support
+        )
+    }
+    return {
+        "threshold": float(threshold),
+        "group_accuracy": group_accuracy,
+        "label_accuracy": label_accuracy,
+        "per_source": per_source,
+    }
+
+
 def print_metrics(metrics_by_threshold: list[dict]) -> None:
     """Print readable per-class and aggregate metric tables."""
     for metrics in metrics_by_threshold:
@@ -99,13 +159,55 @@ def print_metrics(metrics_by_threshold: list[dict]) -> None:
         )
 
 
+def print_real_breakdowns(breakdowns: dict) -> None:
+    print("\nreal group accuracy:")
+    for group, metrics in breakdowns["group_accuracy"].items():
+        print(f"  {group}: accuracy={metrics['accuracy']:.4f} samples={metrics['num_samples']}")
+    print("\nreal label accuracy:")
+    for label, metrics in breakdowns["label_accuracy"].items():
+        print(f"  {label}: accuracy={metrics['accuracy']:.4f} samples={metrics['num_samples']}")
+    print("\nreal per-source metrics:")
+    print(f"{'source':<16} {'precision':>10} {'recall':>10} {'f1':>10} {'support':>10}")
+    for source_name, metrics in breakdowns["per_source"].items():
+        print(
+            f"{source_name:<16} "
+            f"{metrics['precision']:>10.4f} "
+            f"{metrics['recall']:>10.4f} "
+            f"{metrics['f1']:>10.4f} "
+            f"{metrics['support']:>10d}"
+        )
+
+
+def _real_loader_and_groups(config: dict, class_names: list[str], real_split: str) -> tuple[DataLoader, list[str]]:
+    split_path = prepare_real_split(config, class_names)
+    if split_path is None:
+        split_path = Path(config.get("paths", {}).get("report_dir", "outputs/reports")) / "real_train_split.csv"
+    dataset = RealCsvDataset(
+        config.get("real_train", {}).get("dir", "data/real_train"),
+        class_names,
+        config,
+        split=real_split,
+        index_path=split_path,
+    )
+    loader = DataLoader(
+        dataset,
+        batch_size=int(config.get("train", {}).get("batch_size", 32)),
+        shuffle=False,
+        num_workers=int(config.get("train", {}).get("num_workers", 0)),
+        pin_memory=torch.cuda.is_available(),
+    )
+    groups = [str(sample["group"]) for sample in dataset.samples]
+    return loader, groups
+
+
 def evaluate(
     model_path: str | Path,
     split: str = "test",
     device_name: str = "auto",
     report_path: str | Path | None = None,
+    real_split: str | None = None,
 ) -> dict:
-    """Evaluate a checkpoint on a synthesized multi-label dataset split."""
+    """Evaluate a checkpoint on a synthesized split or a real_train split."""
     device = resolve_device(device_name)
     checkpoint = load_checkpoint(model_path, map_location=device)
     class_names = checkpoint.get("class_names")
@@ -117,7 +219,17 @@ def evaluate(
     if not isinstance(config, dict):
         raise ValueError("Checkpoint is missing config")
 
-    loader = make_loader(config, split, shuffle=False)
+    requested_real_split = real_split
+    eval_split = split
+    groups: list[str] | None = None
+    if split == "real_test" and requested_real_split is None:
+        requested_real_split = "test"
+    if requested_real_split is not None:
+        loader, groups = _real_loader_and_groups(config, class_names, requested_real_split)
+        eval_split = f"real_{requested_real_split}"
+    else:
+        loader = make_loader(config, split, shuffle=False, class_names=class_names)
+
     model = NoiseCNN(num_classes=len(class_names)).to(device)
     model.load_state_dict(checkpoint["model_state"])
     probs, targets = collect_probabilities(model, loader, device)
@@ -125,14 +237,21 @@ def evaluate(
         compute_metrics(probs, targets, class_names, threshold) for threshold in DEFAULT_THRESHOLDS
     ]
 
+    threshold = float(config.get("train", {}).get("threshold", 0.5))
+    real_breakdowns = None
+    if groups is not None:
+        real_breakdowns = compute_real_breakdowns(probs, targets, groups, class_names, threshold)
+
     output_path = Path(report_path or "outputs/reports/eval_report.json")
     report = {
         "model": str(model_path),
-        "split": split,
+        "split": eval_split,
         "num_samples": int(targets.shape[0]),
         "class_names": class_names,
         "thresholds": metrics_by_threshold,
     }
+    if real_breakdowns is not None:
+        report["real_breakdowns"] = real_breakdowns
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8") as handle:
         json.dump(report, handle, ensure_ascii=False, indent=2)
@@ -140,8 +259,10 @@ def evaluate(
 
     print(f"device={device}")
     print(f"model={model_path}")
-    print(f"split={split} samples={targets.shape[0]}")
+    print(f"split={eval_split} samples={targets.shape[0]}")
     print_metrics(metrics_by_threshold)
+    if real_breakdowns is not None:
+        print_real_breakdowns(real_breakdowns)
     print(f"\nreport={output_path}")
     return report
 
@@ -149,7 +270,8 @@ def evaluate(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate a multi-label noise source classifier.")
     parser.add_argument("--model", type=Path, required=True, help="Path to model checkpoint.")
-    parser.add_argument("--split", choices=("train", "val", "test"), default="test", help="Dataset split.")
+    parser.add_argument("--split", choices=("train", "val", "test", "real_test"), default="test", help="Dataset split.")
+    parser.add_argument("--real-split", choices=("train", "val", "test"), help="Evaluate a split from real_train_split.csv.")
     parser.add_argument("--device", default="auto", help="Device: auto, cpu, or cuda.")
     parser.add_argument("--report", type=Path, help="Report path (default: outputs/reports/eval_report.json).")
     return parser.parse_args()
@@ -157,7 +279,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    evaluate(args.model, args.split, args.device, args.report)
+    evaluate(args.model, args.split, args.device, args.report, args.real_split)
 
 
 if __name__ == "__main__":
