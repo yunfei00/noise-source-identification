@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+from collections import Counter
 import random
 from pathlib import Path
 
@@ -119,8 +120,13 @@ def prepare_real_split(config: dict, class_names: list[str]) -> Path | None:
     index_path = Path(real_data_config.get("index_file", report_dir / "real_dataset_index.csv"))
     split_path = Path(real_data_config.get("split_file", report_dir / "real_dataset_split.csv"))
 
-    if not index_path.exists():
-        print(f"real dataset index not found; building {index_path}")
+    rebuild_real_files = mode == "real_only"
+
+    if rebuild_real_files or not index_path.exists():
+        if rebuild_real_files:
+            print(f"real_only mode scans all real CSV files; rebuilding {index_path}")
+        else:
+            print(f"real dataset index not found; building {index_path}")
         build_real_index(
             single_dir=single_dir,
             real_train_dir=real_train_dir,
@@ -130,8 +136,11 @@ def prepare_real_split(config: dict, class_names: list[str]) -> Path | None:
             include_real_train=bool(real_data_config.get("include_real_train", True)),
         )
 
-    if not split_path.exists():
-        print(f"real dataset split not found; building {split_path}")
+    if rebuild_real_files or not split_path.exists():
+        if rebuild_real_files:
+            print(f"real_only mode splits all indexed real samples; rebuilding {split_path}")
+        else:
+            print(f"real dataset split not found; building {split_path}")
         split_real_dataset(
             index=index_path,
             output=split_path,
@@ -141,6 +150,31 @@ def prepare_real_split(config: dict, class_names: list[str]) -> Path | None:
             seed=int(legacy_split_config.get("seed", config.get("seed", 42))),
         )
     return split_path
+
+
+def real_split_counts(split_path: str | Path | None) -> dict[str, int]:
+    counts = {
+        "total_real_samples": 0,
+        "real_train_samples": 0,
+        "real_val_samples": 0,
+        "real_test_samples": 0,
+    }
+    if split_path is None:
+        return counts
+
+    path = Path(split_path)
+    if not path.exists():
+        return counts
+
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        split_counts = Counter(row.get("split", "") for row in reader)
+
+    counts["total_real_samples"] = sum(split_counts.values())
+    counts["real_train_samples"] = int(split_counts.get("train", 0))
+    counts["real_val_samples"] = int(split_counts.get("val", 0))
+    counts["real_test_samples"] = int(split_counts.get("test", 0))
+    return counts
 
 
 def _try_synthetic_dataset(config: dict, split: str) -> SyntheticNpyDataset | None:
@@ -202,7 +236,7 @@ def build_dataset_and_sampler(
     if mode == "real_only":
         real = _try_real_dataset(config, split, class_names, split_path)
         if real is None:
-            raise ValueError("real_only mode requires non-empty real_train dataset")
+            raise ValueError("real_only mode requires non-empty real dataset")
         stats["real_samples"] = len(real)
         return real, None, stats
 
@@ -388,6 +422,7 @@ def train(config: dict) -> None:
     report_dir.mkdir(parents=True, exist_ok=True)
 
     real_split_path = prepare_real_split(config, class_names)
+    real_counts = real_split_counts(real_split_path)
     train_dataset, train_sampler, train_stats = build_dataset_and_sampler(config, "train", class_names, real_split_path)
     val_dataset, val_sampler, val_stats = build_dataset_and_sampler(config, "val", class_names, real_split_path)
     if val_sampler is not None:
@@ -438,14 +473,23 @@ def train(config: dict) -> None:
             min_delta=float(early_stopping_config.get("min_delta", 0.001)),
         )
 
+    synthetic_samples = train_stats["synthetic_samples"] + val_stats["synthetic_samples"]
+    total_real_samples = real_counts["total_real_samples"] or train_stats["real_samples"] + val_stats["real_samples"]
+    real_train_samples = real_counts["real_train_samples"] or train_stats["real_samples"]
+    real_val_samples = real_counts["real_val_samples"] or val_stats["real_samples"]
+    real_test_samples = real_counts["real_test_samples"]
+
     print(f"device={device}")
     print(f"training_data.mode={mode}")
+    print(f"total_real_samples={total_real_samples}")
+    print(f"real_train_samples={real_train_samples}")
+    print(f"real_val_samples={real_val_samples}")
+    print(f"real_test_samples={real_test_samples}")
+    print(f"synthetic_samples={synthetic_samples}")
     print(f"synthetic_ratio={synthetic_ratio}")
     print(f"real_ratio={real_ratio}")
     print(f"synthetic_train_samples={train_stats['synthetic_samples']}")
     print(f"synthetic_val_samples={val_stats['synthetic_samples']}")
-    print(f"real_train_samples={train_stats['real_samples']}")
-    print(f"real_val_samples={val_stats['real_samples']}")
     print(f"num_classes={len(class_names)}")
     print(f"class_names={class_names}")
 

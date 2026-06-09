@@ -192,9 +192,11 @@ def summarize_rows(rows: list[dict[str, str]], class_names: list[str], warnings_
     ratio_counts = Counter(
         ratio for row in rows if (ratio := _ratio_from_condition(row.get("condition_path", ""))) is not None
     )
+    total_real_samples = len(rows)
     return {
         "class_names": class_names,
-        "total_samples": len(rows),
+        "total_samples": total_real_samples,
+        "total_real_samples": total_real_samples,
         "single_samples": int(source_root_counts.get("single", 0)),
         "real_train_samples": int(source_root_counts.get("real_train", 0)),
         "group_counts": dict(sorted(group_counts.items())),
@@ -206,6 +208,7 @@ def summarize_rows(rows: list[dict[str, str]], class_names: list[str], warnings_
 
 def print_summary(summary: dict[str, Any]) -> None:
     print(f"class_names={summary['class_names']}")
+    print(f"total_real_samples = {summary['total_real_samples']}")
     print(f"single samples={summary['single_samples']}")
     print(f"real_train samples={summary['real_train_samples']}")
 
