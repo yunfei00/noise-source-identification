@@ -34,8 +34,11 @@ augmentation:
   source_dropout_prob: 0.0
 training_data:
   mode: real_only
-real_train:
-  dir: data/real_train
+real_data:
+  single_dir: data/single
+  combo_dir: data/real_dataset
+  index_file: outputs/reports/real_dataset_index.csv
+  split_file: outputs/reports/real_dataset_split.csv
 real_split:
   enabled: true
   train_ratio: 0.7
@@ -43,6 +46,19 @@ real_split:
   test_ratio: 0.15
   seed: 42
   split_by_group: true
+train:
+  epochs: 200
+  batch_size: 32
+  threshold: 0.5
+  lr: 0.001
+  device: auto
+  num_workers: 0
+early_stopping:
+  enabled: true
+  monitor: micro_f1
+  mode: max
+  patience: 15
+  min_delta: 0.001
 cache:
   enabled: false
   dir: data/cache_stft
@@ -52,19 +68,6 @@ stft:
   noverlap: 128
   target_freq_bins: 128
   target_time_bins: 64
-train:
-  batch_size: 32
-  epochs: 200
-  lr: 0.001
-  threshold: 0.5
-  device: auto
-  num_workers: 0
-early_stopping:
-  enabled: true
-  monitor: micro_f1
-  mode: max
-  patience: 15
-  min_delta: 0.001
 scheduler:
   enabled: true
   type: ReduceLROnPlateau
@@ -73,9 +76,3 @@ scheduler:
 paths:
   checkpoint_dir: outputs/checkpoints
   report_dir: outputs/reports
-real_data:
-  enabled: true
-  index_file: outputs/reports/real_dataset_index.csv
-  split_file: outputs/reports/real_dataset_split.csv
-  include_single: true
-  include_real_train: true

@@ -13,7 +13,7 @@ import numpy as np
 from src.dataset import parse_group_label
 
 DEFAULT_SINGLE_DIR = Path("data/single")
-DEFAULT_REAL_TRAIN_DIR = Path("data/real_train")
+DEFAULT_COMBO_DIR = Path("data/real_dataset")
 DEFAULT_OUTPUT = Path("outputs/reports/real_dataset_index.csv")
 DEFAULT_SUMMARY_OUTPUT = Path("outputs/reports/real_dataset_summary.json")
 
@@ -92,7 +92,7 @@ def scan_single(
     for group_dir in group_dirs:
         group = group_dir.name
         if group not in class_index:
-            _warn(f"Skipping unparseable single group '{group}': not present in class_names", warnings_list)
+            _warn(f"Skipping single group '{group}': not present in class_names", warnings_list)
             continue
         csv_files = sorted(path for path in group_dir.rglob("*.csv") if path.is_file())
         if not csv_files:
@@ -116,25 +116,25 @@ def scan_single(
     return rows
 
 
-def scan_real_train(
-    real_dir: str | Path,
+def scan_real_dataset(
+    combo_dir: str | Path,
     class_names: list[str],
     warnings_list: list[str] | None = None,
 ) -> list[dict[str, str]]:
-    """Recursively scan data/real_train and parse labels from first-level mix groups."""
+    """Recursively scan data/real_dataset and parse labels from first-level combo groups."""
     warnings_list = warnings_list if warnings_list is not None else []
-    root = Path(real_dir)
+    root = Path(combo_dir)
     rows: list[dict[str, str]] = []
 
     if not root.exists():
-        _warn(f"real_train directory does not exist: {root}", warnings_list)
+        _warn(f"real_dataset directory does not exist: {root}", warnings_list)
         return rows
     if not root.is_dir():
-        raise ValueError(f"real_train path must be a directory: {root}")
+        raise ValueError(f"real_dataset path must be a directory: {root}")
 
     group_dirs = sorted((path for path in root.iterdir() if path.is_dir()), key=lambda path: path.name)
     if not group_dirs:
-        _warn(f"real_train directory is empty: {root}", warnings_list)
+        _warn(f"real_dataset directory is empty: {root}", warnings_list)
         return rows
 
     for group_dir in group_dirs:
@@ -142,12 +142,12 @@ def scan_real_train(
         try:
             label = parse_group_label(group, class_names)
         except ValueError as exc:
-            _warn(f"Skipping unparseable real_train group '{group}': {exc}", warnings_list)
+            _warn(f"Skipping unparseable real_dataset group '{group}': {exc}", warnings_list)
             continue
 
         csv_files = sorted(path for path in group_dir.rglob("*.csv") if path.is_file())
         if not csv_files:
-            _warn(f"No CSV files found recursively under real_train group: {group_dir}", warnings_list)
+            _warn(f"No CSV files found recursively under real_dataset group: {group_dir}", warnings_list)
             continue
 
         label_text = label_to_text(label)
@@ -155,7 +155,7 @@ def scan_real_train(
         for csv_path in csv_files:
             row = {
                 "file": _relative_to_cwd(csv_path),
-                "source_root": "real_train",
+                "source_root": "real_dataset",
                 "group": group,
                 "condition_path": _condition_path(csv_path, group_dir),
                 "label": label_text,
@@ -185,49 +185,58 @@ def _ratio_from_condition(condition_path: str) -> str | None:
     return None
 
 
-def summarize_rows(rows: list[dict[str, str]], class_names: list[str], warnings_list: list[str]) -> dict[str, Any]:
+def summarize_rows(
+    rows: list[dict[str, str]],
+    class_names: list[str],
+    warnings_list: list[str],
+    invalid_groups: list[str] | None = None,
+) -> dict[str, Any]:
     group_counts = Counter(row["group"] for row in rows)
     label_counts = Counter(row["label"] for row in rows)
     source_root_counts = Counter(row["source_root"] for row in rows)
     ratio_counts = Counter(
         ratio for row in rows if (ratio := _ratio_from_condition(row.get("condition_path", ""))) is not None
     )
-    total_real_samples = len(rows)
     return {
         "class_names": class_names,
-        "total_samples": total_real_samples,
-        "total_real_samples": total_real_samples,
+        "total_samples": len(rows),
         "single_samples": int(source_root_counts.get("single", 0)),
-        "real_train_samples": int(source_root_counts.get("real_train", 0)),
+        "combo_samples": int(source_root_counts.get("real_dataset", 0)),
         "group_counts": dict(sorted(group_counts.items())),
         "label_counts": dict(sorted(label_counts.items())),
         "ratio_counts": dict(sorted(ratio_counts.items())),
+        "invalid_groups": sorted(set(invalid_groups or [])),
         "warnings": warnings_list,
     }
 
 
 def print_summary(summary: dict[str, Any]) -> None:
     print(f"class_names={summary['class_names']}")
-    print(f"total_real_samples = {summary['total_real_samples']}")
-    print(f"single samples={summary['single_samples']}")
-    print(f"real_train samples={summary['real_train_samples']}")
+    print(f"total_samples={summary['total_samples']}")
+    print(f"single_samples={summary['single_samples']}")
+    print(f"combo_samples={summary['combo_samples']}")
 
-    print("group counts:")
+    print("group_counts:")
     if not summary["group_counts"]:
         print("  (none)")
     for group, count in summary["group_counts"].items():
         print(f"  {group}: {count}")
 
-    print("label counts:")
+    print("label_counts:")
     if not summary["label_counts"]:
         print("  (none)")
     for label, count in summary["label_counts"].items():
         print(f"  {label}: {count}")
 
     if summary["ratio_counts"]:
-        print("ratio counts:")
+        print("ratio_counts:")
         for ratio, count in summary["ratio_counts"].items():
             print(f"  {ratio}: {count}")
+
+    if summary["invalid_groups"]:
+        print("invalid_groups:")
+        for group in summary["invalid_groups"]:
+            print(f"  {group}")
 
     if summary["warnings"]:
         print("warnings:")
@@ -245,27 +254,32 @@ def write_summary(summary: dict[str, Any], output: str | Path) -> None:
 
 def build_real_index(
     single_dir: str | Path = DEFAULT_SINGLE_DIR,
-    real_train_dir: str | Path = DEFAULT_REAL_TRAIN_DIR,
+    combo_dir: str | Path = DEFAULT_COMBO_DIR,
     output: str | Path = DEFAULT_OUTPUT,
     summary_output: str | Path | None = None,
     class_names: list[str] | None = None,
     include_single: bool = True,
-    include_real_train: bool = True,
+    include_combo: bool = True,
 ) -> tuple[list[dict[str, str]], dict[str, Any]]:
     discovered_class_names = class_names or discover_class_names(single_dir)
-    if not discovered_class_names:
-        raise ValueError("No class names found. Create source directories under data/single or pass --class-names.")
-
     warnings_list: list[str] = []
+    if not discovered_class_names:
+        _warn("No class names found under data/single; writing an empty real dataset index.", warnings_list)
+
     rows: list[dict[str, str]] = []
+    invalid_groups: list[str] = []
     if include_single:
         rows.extend(scan_single(single_dir, discovered_class_names, warnings_list))
-    if include_real_train:
-        rows.extend(scan_real_train(real_train_dir, discovered_class_names, warnings_list))
+    if include_combo:
+        before_warning_count = len(warnings_list)
+        rows.extend(scan_real_dataset(combo_dir, discovered_class_names, warnings_list))
+        for message in warnings_list[before_warning_count:]:
+            if "Skipping unparseable real_dataset group" in message:
+                invalid_groups.append(message.split("'", 2)[1])
 
     rows = sorted(rows, key=lambda row: (row["source_root"], row["group"], row["condition_path"], row["file"]))
     write_index(rows, output, discovered_class_names)
-    summary = summarize_rows(rows, discovered_class_names, warnings_list)
+    summary = summarize_rows(rows, discovered_class_names, warnings_list, invalid_groups)
     if summary_output is None:
         summary_output = Path(output).with_name("real_dataset_summary.json")
     write_summary(summary, summary_output)
@@ -276,14 +290,14 @@ def build_real_index(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build a unified recursive real dataset index from data/single and data/real_train.")
+    parser = argparse.ArgumentParser(description="Build a unified recursive real dataset index from data/single and data/real_dataset.")
     parser.add_argument("--single-dir", type=Path, default=DEFAULT_SINGLE_DIR, help="Single-source root directory.")
-    parser.add_argument("--real-train-dir", type=Path, default=DEFAULT_REAL_TRAIN_DIR, help="Real combo training root directory.")
+    parser.add_argument("--combo-dir", type=Path, default=DEFAULT_COMBO_DIR, help="Real combo dataset root directory.")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT, help="Output unified index CSV path.")
     parser.add_argument("--summary-output", type=Path, default=None, help="Output summary JSON path.")
     parser.add_argument("--class-names", nargs="+", help="Optional ordered class names; defaults to sorted data/single dirs.")
     parser.add_argument("--no-single", action="store_true", help="Do not include data/single rows.")
-    parser.add_argument("--no-real-train", action="store_true", help="Do not include data/real_train rows.")
+    parser.add_argument("--no-combo", action="store_true", help="Do not include data/real_dataset rows.")
     return parser.parse_args()
 
 
@@ -291,12 +305,12 @@ def main() -> None:
     args = parse_args()
     build_real_index(
         single_dir=args.single_dir,
-        real_train_dir=args.real_train_dir,
+        combo_dir=args.combo_dir,
         output=args.output,
         summary_output=args.summary_output,
         class_names=args.class_names,
         include_single=not args.no_single,
-        include_real_train=not args.no_real_train,
+        include_combo=not args.no_combo,
     )
 
 

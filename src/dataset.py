@@ -24,7 +24,7 @@ def parse_group_label(group: str, class_names: list[str]) -> np.ndarray:
     if is_unknown_group(group):
         return np.zeros(len(class_names), dtype=np.float32)
     source_names = set(_SOURCE_NAME_RE.findall(group))
-    if not source_names or not (group.endswith("_only") or group.endswith("_mix")):
+    if not source_names or (group not in class_names and not group.endswith("_mix")):
         raise ValueError(f"Cannot parse label from real-data group: {group}")
     unknown_sources = sorted(source_names.difference(class_names))
     if unknown_sources:
@@ -120,9 +120,9 @@ class RealCsvDataset(SyntheticNpyDataset):
     ):
         self.root = Path(real_dir)
         if not self.root.exists():
-            raise FileNotFoundError(f"Real training directory not found: {self.root}")
+            raise FileNotFoundError(f"Real dataset root not found: {self.root}")
         if not self.root.is_dir():
-            raise ValueError(f"real_train dir must be a directory: {self.root}")
+            raise ValueError(f"real dataset root must be a directory: {self.root}")
         self.class_names = class_names
         self._configure_features(config)
         self.cache_config = config.get("cache", {})
@@ -174,19 +174,19 @@ class RealCsvDataset(SyntheticNpyDataset):
         for group_dir in sorted((path for path in self.root.iterdir() if path.is_dir()), key=lambda p: p.name):
             csv_files = sorted(path for path in group_dir.rglob("*.csv") if path.is_file())
             if not csv_files:
-                print(f"warning: no CSV files found recursively under real_train group: {group_dir}")
+                print(f"warning: no CSV files found recursively under real_dataset group: {group_dir}")
                 continue
             try:
                 label = parse_group_label(group_dir.name, self.class_names)
             except ValueError as exc:
-                print(f"warning: skipping unparseable real_train group {group_dir.name}: {exc}")
+                print(f"warning: skipping unparseable real_dataset group {group_dir.name}: {exc}")
                 continue
             for csv_path in csv_files:
                 samples.append(
                     {
                         "path": csv_path,
                         "file": csv_path.relative_to(self.root).as_posix(),
-                        "source_root": "real_train",
+                        "source_root": "real_dataset",
                         "group": group_dir.name,
                         "condition_path": csv_path.relative_to(group_dir).parent.as_posix() if csv_path.relative_to(group_dir).parent.as_posix() != "." else "",
                         "label": label,
