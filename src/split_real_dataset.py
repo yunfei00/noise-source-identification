@@ -64,6 +64,11 @@ def ratio_key(condition_path: str) -> str:
     return "__no_ratio__"
 
 
+def stratification_key(row: dict[str, str]) -> tuple[str, str]:
+    """Use first-level group labels and nested ratio_* conditions as split strata."""
+    return row["group"], ratio_key(row.get("condition_path", ""))
+
+
 def _assign_bucket(
     rows: list[dict[str, str]],
     rng: random.Random,
@@ -94,7 +99,7 @@ def split_rows(
     rng = random.Random(seed)
     buckets: dict[tuple[str, str], list[dict[str, str]]] = defaultdict(list)
     for row in rows:
-        buckets[(row["group"], ratio_key(row.get("condition_path", "")))].append(row)
+        buckets[stratification_key(row)].append(row)
 
     split_output: list[dict[str, str]] = []
     for (group, ratio), bucket_rows in sorted(buckets.items()):
