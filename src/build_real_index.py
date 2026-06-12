@@ -185,6 +185,13 @@ def _ratio_from_condition(condition_path: str) -> str | None:
     return None
 
 
+def _ratio_counts(rows: list[dict[str, str]]) -> Counter[str]:
+    """Count every present ratio_* condition, including future ratio naming variants."""
+    return Counter(
+        ratio for row in rows if (ratio := _ratio_from_condition(row.get("condition_path", ""))) is not None
+    )
+
+
 def summarize_rows(
     rows: list[dict[str, str]],
     class_names: list[str],
@@ -194,9 +201,7 @@ def summarize_rows(
     group_counts = Counter(row["group"] for row in rows)
     label_counts = Counter(row["label"] for row in rows)
     source_root_counts = Counter(row["source_root"] for row in rows)
-    ratio_counts = Counter(
-        ratio for row in rows if (ratio := _ratio_from_condition(row.get("condition_path", ""))) is not None
-    )
+    ratio_counts = _ratio_counts(rows)
     return {
         "class_names": class_names,
         "total_samples": len(rows),

@@ -72,10 +72,16 @@ def compute_metrics(
             class_names, precision, recall, f1, support
         )
     ]
+    exact_matches = np.all(preds == targets, axis=1)
+    over_predictions = np.any(preds > targets, axis=1)
+    under_predictions = np.any(preds < targets, axis=1)
     overall = {
         "micro_f1": float(f1_score(targets, preds, average="micro", zero_division=0)),
         "macro_f1": float(f1_score(targets, preds, average="macro", zero_division=0)),
         "sample_f1": float(f1_score(targets, preds, average="samples", zero_division=0)),
+        "exact_match": float(exact_matches.mean()) if len(exact_matches) else 0.0,
+        "over_prediction_rate": float(over_predictions.mean()) if len(over_predictions) else 0.0,
+        "under_prediction_rate": float(under_predictions.mean()) if len(under_predictions) else 0.0,
     }
     return {"threshold": threshold, "per_class": per_class, "overall": overall}
 
@@ -178,7 +184,10 @@ def print_metrics(metrics_by_threshold: list[dict]) -> None:
             "overall: "
             f"micro_f1={overall['micro_f1']:.4f} "
             f"macro_f1={overall['macro_f1']:.4f} "
-            f"sample_f1={overall['sample_f1']:.4f}"
+            f"sample_f1={overall['sample_f1']:.4f} "
+            f"exact_match={overall['exact_match']:.4f} "
+            f"over_prediction_rate={overall['over_prediction_rate']:.4f} "
+            f"under_prediction_rate={overall['under_prediction_rate']:.4f}"
         )
 
 
@@ -234,6 +243,7 @@ def evaluate(
     device_name: str = "auto",
     report_path: str | Path | None = None,
     real_split: str | None = None,
+    threshold: float | None = None,
 ) -> dict:
     """Evaluate a checkpoint on a synthesized split or a real dataset split."""
     device = resolve_device(device_name)
@@ -264,10 +274,10 @@ def evaluate(
         compute_metrics(probs, targets, class_names, threshold) for threshold in DEFAULT_THRESHOLDS
     ]
 
-    threshold = float(config.get("train", {}).get("threshold", 0.5))
+    selected_threshold = float(config.get("train", {}).get("threshold", 0.5) if threshold is None else threshold)
     real_breakdowns = None
     if groups is not None:
-        real_breakdowns = compute_real_breakdowns(probs, targets, groups, class_names, threshold, condition_paths)
+        real_breakdowns = compute_real_breakdowns(probs, targets, groups, class_names, selected_threshold, condition_paths)
 
     output_path = Path(report_path or "outputs/reports/eval_report.json")
     report = {
@@ -275,6 +285,7 @@ def evaluate(
         "split": eval_split,
         "num_samples": int(targets.shape[0]),
         "class_names": class_names,
+        "selected_threshold": selected_threshold,
         "thresholds": metrics_by_threshold,
     }
     if real_breakdowns is not None:
@@ -301,12 +312,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--real-split", choices=("train", "val", "test"), help="Evaluate a split from real_dataset_split.csv.")
     parser.add_argument("--device", default="auto", help="Device: auto, cpu, or cuda.")
     parser.add_argument("--report", type=Path, help="Report path (default: outputs/reports/eval_report.json).")
+    parser.add_argument("--threshold", type=float, help="Threshold for real-data breakdowns (default: config train.threshold).")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    evaluate(args.model, args.split, args.device, args.report, args.real_split)
+    evaluate(args.model, args.split, args.device, args.report, args.real_split, args.threshold)
 
 
 if __name__ == "__main__":
