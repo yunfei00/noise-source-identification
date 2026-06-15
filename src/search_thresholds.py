@@ -89,9 +89,17 @@ def search_thresholds(
             "exact_match": f"{overall['exact_match']:.10g}",
             "over_prediction_rate": f"{overall['over_prediction_rate']:.10g}",
             "under_prediction_rate": f"{overall['under_prediction_rate']:.10g}",
+            "source5_over_prediction_rate": f"{overall['source5_over_prediction_rate']:.10g}",
+            "double_source_predict_as_triple_rate": f"{overall['double_source_predict_as_triple_rate']:.10g}",
         }
         row.update({class_name: f"{value:.10g}" for class_name, value in zip(class_names, threshold_combo)})
+        for class_name in class_names:
+            source_metrics = metrics["per_source"][class_name]
+            row[f"{class_name}_precision"] = f"{source_metrics['precision']:.10g}"
+            row[f"{class_name}_recall"] = f"{source_metrics['recall']:.10g}"
+            row[f"{class_name}_f1"] = f"{source_metrics['f1']:.10g}"
         rows.append(row)
+    rows.sort(key=lambda row: float(row["metric_value"]), reverse=True)
 
     output_path = Path(output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -106,13 +114,23 @@ def search_thresholds(
         "exact_match",
         "over_prediction_rate",
         "under_prediction_rate",
+        "source5_over_prediction_rate",
+        "double_source_predict_as_triple_rate",
     ]
+    for class_name in class_names:
+        fieldnames.extend(
+            [
+                f"{class_name}_precision",
+                f"{class_name}_recall",
+                f"{class_name}_f1",
+            ]
+        )
     with output_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
 
-    best = max(rows, key=lambda row: float(row["metric_value"])) if rows else None
+    best = rows[0] if rows else None
     best_thresholds_path = output_path.with_name("best_thresholds.json")
     if best is not None:
         best_payload = {
@@ -121,6 +139,11 @@ def search_thresholds(
             "metric": metric,
             "metric_value": float(best["metric_value"]),
             "thresholds": {class_name: float(best[class_name]) for class_name in class_names},
+            "exact_match": float(best["exact_match"]),
+            "micro_f1": float(best["micro_f1"]),
+            "macro_f1": float(best["macro_f1"]),
+            "source5_over_prediction_rate": float(best["source5_over_prediction_rate"]),
+            "double_source_predict_as_triple_rate": float(best["double_source_predict_as_triple_rate"]),
         }
         with best_thresholds_path.open("w", encoding="utf-8") as handle:
             json.dump(best_payload, handle, ensure_ascii=False, indent=2)

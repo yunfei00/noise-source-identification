@@ -113,7 +113,48 @@ def _dataset_labels(dataset: Dataset) -> np.ndarray:
     return np.vstack(labels).astype(np.float32)
 
 
-def build_label_balanced_sampler(dataset: Dataset, strategy: str, seed: int) -> WeightedRandomSampler | None:
+def sampler_settings(config: dict) -> tuple[bool, str]:
+    sampler_config = config.get("sampler")
+    if isinstance(sampler_config, dict):
+        enabled = bool(sampler_config.get("enabled", False))
+        strategy = str(sampler_config.get("strategy", "none"))
+    else:
+        train_config = config.get("train", {})
+        enabled = bool(train_config.get("use_weighted_sampler", False))
+        strategy = str(train_config.get("sample_weight_strategy", "label_combo" if enabled else "none"))
+    strategy = strategy.strip().lower()
+    if strategy not in {"none", "source_balance", "label_combo"}:
+        raise ValueError(f"sampler.strategy must be none, source_balance, or label_combo; got {strategy}")
+    if strategy == "none":
+        enabled = False
+    return enabled, strategy
+
+
+def _print_sampler_summary(labels: np.ndarray, weights: list[float] | np.ndarray, strategy: str) -> None:
+    keys = [_label_to_combo_key(label) for label in labels]
+    counts = Counter(keys)
+    weights_array = np.asarray(weights, dtype=np.float64)
+    by_combo: dict[str, list[float]] = {}
+    for key, weight in zip(keys, weights_array):
+        by_combo.setdefault(key, []).append(float(weight))
+
+    print(f"sampler.strategy={strategy}")
+    print("label_combo original counts and sampling weights:")
+    for key in sorted(counts):
+        combo_weights = by_combo[key]
+        print(
+            f"  {key}: count={counts[key]} "
+            f"sample_weight={float(np.mean(combo_weights)):.10g}"
+        )
+
+
+def build_label_balanced_sampler(
+    dataset: Dataset,
+    strategy: str,
+    seed: int,
+    *,
+    verbose: bool = False,
+) -> WeightedRandomSampler | None:
     if strategy == "none":
         return None
     labels = _dataset_labels(dataset).astype(np.int32)
@@ -131,7 +172,9 @@ def build_label_balanced_sampler(dataset: Dataset, strategy: str, seed: int) -> 
         sample_weights = labels * pos_weights + (1 - labels) * neg_weights
         weights = sample_weights.mean(axis=1).astype(np.float64).tolist()
     else:
-        raise ValueError(f"Unsupported sample_weight_strategy: {strategy}")
+        raise ValueError(f"Unsupported sampler.strategy: {strategy}")
+    if verbose:
+        _print_sampler_summary(labels, weights, strategy)
     generator = torch.Generator()
     generator.manual_seed(seed)
     return WeightedRandomSampler(weights, num_samples=len(weights), replacement=True, generator=generator)
@@ -153,9 +196,11 @@ class AsymmetricBCEWithLogitsLoss(nn.Module):
         pos_weight: torch.Tensor | None = None,
         fp_penalty: float = 1.5,
         fn_penalty: float = 1.0,
+        class_fp_penalty: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
         self.register_buffer("pos_weight", pos_weight if pos_weight is not None else None)
+        self.register_buffer("class_fp_penalty", class_fp_penalty if class_fp_penalty is not None else None)
         self.fp_penalty = float(fp_penalty)
         self.fn_penalty = float(fn_penalty)
 
@@ -171,22 +216,48 @@ class AsymmetricBCEWithLogitsLoss(nn.Module):
             torch.full_like(targets, self.fn_penalty),
             torch.full_like(targets, self.fp_penalty),
         )
+        if self.class_fp_penalty is not None:
+            class_penalty = self.class_fp_penalty.view(1, -1).to(device=targets.device, dtype=targets.dtype)
+            weights = torch.where(targets > 0.5, weights, weights * class_penalty)
         return (loss * weights).mean()
 
 
 def build_criterion(config: dict, train_labels: np.ndarray, class_names: list[str], device: torch.device) -> nn.Module:
     loss_config = config.get("loss", {})
-    loss_type = str(loss_config.get("type", "bce"))
+    loss_type = str(loss_config.get("type", "bce")).strip().lower()
+    use_pos_weight = bool(loss_config.get("use_pos_weight", False))
+    print(f"loss.type={loss_type}")
+    print(f"loss.use_pos_weight={use_pos_weight}")
     pos_weight = None
-    if bool(loss_config.get("use_pos_weight", False)):
+    if use_pos_weight:
         pos_weight = compute_pos_weight(train_labels, class_names, device)
     if loss_type == "bce":
         return nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     if loss_type == "asymmetric_bce":
+        class_fp_config = loss_config.get("class_fp_penalty", {})
+        if class_fp_config is None:
+            class_fp_config = {}
+        if not isinstance(class_fp_config, dict):
+            raise ValueError("loss.class_fp_penalty must be a mapping from class name to penalty")
+        unknown_classes = sorted(set(class_fp_config).difference(class_names))
+        for class_name in unknown_classes:
+            print(f"warning: ignoring loss.class_fp_penalty for unknown class: {class_name}")
+        class_fp_values = [
+            float(class_fp_config.get(class_name, 1.0))
+            for class_name in class_names
+        ]
+        class_fp_penalty = torch.as_tensor(class_fp_values, dtype=torch.float32, device=device)
+        print(f"loss.fp_penalty={float(loss_config.get('fp_penalty', 1.5))}")
+        print(f"loss.fn_penalty={float(loss_config.get('fn_penalty', 1.0))}")
+        print(
+            "loss.class_fp_penalty="
+            + json.dumps({name: value for name, value in zip(class_names, class_fp_values)}, ensure_ascii=False)
+        )
         return AsymmetricBCEWithLogitsLoss(
             pos_weight=pos_weight,
             fp_penalty=float(loss_config.get("fp_penalty", 1.5)),
             fn_penalty=float(loss_config.get("fn_penalty", 1.0)),
+            class_fp_penalty=class_fp_penalty,
         )
     raise ValueError(f"Unsupported loss.type: {loss_type}")
 
@@ -334,14 +405,25 @@ def build_dataset_and_sampler(
     split: str,
     class_names: list[str],
     split_path: Path | None = None,
+    *,
+    verbose_sampler: bool = False,
 ) -> tuple[torch.utils.data.Dataset, WeightedRandomSampler | None, dict[str, int]]:
     mode, synthetic_ratio, real_ratio = training_data_config(config)
+    sampler_enabled, sampler_strategy = sampler_settings(config)
     stats = {"synthetic_samples": 0, "real_samples": 0}
 
     if mode == "synthetic_only":
         synthetic = SyntheticNpyDataset(config.get("data", {}).get("mixed_dir", "data/mixed"), split, config)
         stats["synthetic_samples"] = len(synthetic)
-        return synthetic, None, stats
+        sampler = None
+        if split == "train" and sampler_enabled:
+            sampler = build_label_balanced_sampler(
+                synthetic,
+                sampler_strategy,
+                int(config.get("seed", 42)),
+                verbose=verbose_sampler,
+            )
+        return synthetic, sampler, stats
 
     if mode == "real_only":
         real = _try_real_dataset(config, split, class_names, split_path)
@@ -349,12 +431,12 @@ def build_dataset_and_sampler(
             raise ValueError(f"real_only mode requires non-empty split={split} samples in real_data.split_file")
         stats["real_samples"] = len(real)
         sampler = None
-        train_config = config.get("train", {})
-        if split == "train" and bool(train_config.get("use_weighted_sampler", False)):
+        if split == "train" and sampler_enabled:
             sampler = build_label_balanced_sampler(
                 real,
-                str(train_config.get("sample_weight_strategy", "label_combo")),
+                sampler_strategy,
                 int(config.get("seed", 42)),
+                verbose=verbose_sampler,
             )
         return real, sampler, stats
 
@@ -381,15 +463,17 @@ def build_dataset_and_sampler(
     dataset = ConcatDataset([synthetic, real])
     sampler = None
     if split == "train":
-        train_config = config.get("train", {})
-        if bool(train_config.get("use_weighted_sampler", False)):
+        if sampler_enabled:
             sampler = build_label_balanced_sampler(
                 dataset,
-                str(train_config.get("sample_weight_strategy", "label_combo")),
+                sampler_strategy,
                 int(config.get("seed", 42)),
+                verbose=verbose_sampler,
             )
-        else:
+        elif not isinstance(config.get("sampler"), dict):
             sampler = _weighted_sampler(len(synthetic), len(real), synthetic_ratio, real_ratio, int(config.get("seed", 42)))
+        else:
+            sampler = None
     return dataset, sampler, stats
 
 
@@ -459,18 +543,40 @@ def run_epoch(
     return total_loss / total_items, np.vstack(all_probs), np.vstack(all_targets)
 
 
-def compute_validation_metrics(probs: np.ndarray, targets: np.ndarray, threshold: float) -> dict[str, float]:
+def compute_validation_metrics(
+    probs: np.ndarray,
+    targets: np.ndarray,
+    threshold: float,
+    class_names: list[str] | None = None,
+) -> dict[str, float]:
     preds = (probs >= threshold).astype(np.int32)
     targets = targets.astype(np.int32)
     exact_matches = np.all(preds == targets, axis=1)
     over_predictions = np.any(preds > targets, axis=1)
     under_predictions = np.any(preds < targets, axis=1)
+    true_double = targets.sum(axis=1) == 2
+    predicted_triple = preds.sum(axis=1) == 3
+    source5_index = None
+    if class_names is not None and "source_5" in class_names:
+        source5_index = class_names.index("source_5")
+    elif preds.shape[1] >= 3:
+        source5_index = 2
+    if source5_index is not None:
+        no_source5 = targets[:, source5_index] == 0
+        source5_over_prediction_rate = (
+            float((preds[no_source5, source5_index] == 1).mean()) if np.any(no_source5) else 0.0
+        )
+    else:
+        source5_over_prediction_rate = 0.0
     return {
         "micro_f1": float(f1_score(targets, preds, average="micro", zero_division=0)),
         "macro_f1": float(f1_score(targets, preds, average="macro", zero_division=0)),
         "exact_match": float(exact_matches.mean()) if len(exact_matches) else 0.0,
         "over_prediction_rate": float(over_predictions.mean()) if len(over_predictions) else 0.0,
         "under_prediction_rate": float(under_predictions.mean()) if len(under_predictions) else 0.0,
+        "double_to_triple_rate": float(predicted_triple[true_double].mean()) if np.any(true_double) else 0.0,
+        "double_source_predict_as_triple_rate": float(predicted_triple[true_double].mean()) if np.any(true_double) else 0.0,
+        "source5_over_prediction_rate": source5_over_prediction_rate,
     }
 
 
@@ -507,7 +613,17 @@ class EarlyStopping:
 def save_training_history(path: str | Path, history: list[dict[str, float | int]]) -> None:
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = ["epoch", "train_loss", "val_loss", "micro_f1", "macro_f1", "exact_match", "over_prediction_rate", "under_prediction_rate", "lr"]
+    fieldnames = [
+        "epoch",
+        "train_loss",
+        "val_loss",
+        "micro_f1",
+        "macro_f1",
+        "exact_match",
+        "double_to_triple_rate",
+        "source5_over_prediction_rate",
+        "lr",
+    ]
     with output_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
@@ -541,6 +657,7 @@ def train(config: dict) -> None:
     early_stopping_config = config.get("early_stopping", {})
     scheduler_config = config.get("scheduler", {})
     paths_config = config.get("paths", {})
+    sampler_enabled, sampler_strategy = sampler_settings(config)
 
     mode, synthetic_ratio, real_ratio = training_data_config(config)
     class_names = load_class_names(
@@ -556,7 +673,13 @@ def train(config: dict) -> None:
 
     real_split_path = prepare_real_split(config, class_names)
     real_counts = real_split_counts(real_split_path)
-    train_dataset, train_sampler, train_stats = build_dataset_and_sampler(config, "train", class_names, real_split_path)
+    train_dataset, train_sampler, train_stats = build_dataset_and_sampler(
+        config,
+        "train",
+        class_names,
+        real_split_path,
+        verbose_sampler=True,
+    )
     val_dataset, val_sampler, val_stats = build_dataset_and_sampler(config, "val", class_names, real_split_path)
     if val_sampler is not None:
         val_sampler = None
@@ -597,13 +720,24 @@ def train(config: dict) -> None:
         )
 
     early_stopping = None
+    monitor = str(early_stopping_config.get("monitor", "exact_match"))
+    monitor_mode = str(early_stopping_config.get("mode", "max"))
     if bool(early_stopping_config.get("enabled", False)):
-        monitor = str(early_stopping_config.get("monitor", "micro_f1"))
-        supported_monitors = {"val_loss", "micro_f1", "macro_f1", "exact_match", "over_prediction_rate", "under_prediction_rate"}
+        supported_monitors = {
+            "val_loss",
+            "micro_f1",
+            "macro_f1",
+            "exact_match",
+            "over_prediction_rate",
+            "under_prediction_rate",
+            "double_to_triple_rate",
+            "double_source_predict_as_triple_rate",
+            "source5_over_prediction_rate",
+        }
         if monitor not in supported_monitors:
             raise ValueError(f"Unsupported early stopping monitor: {monitor}")
         early_stopping = EarlyStopping(
-            mode=str(early_stopping_config.get("mode", "max")),
+            mode=monitor_mode,
             patience=int(early_stopping_config.get("patience", 15)),
             min_delta=float(early_stopping_config.get("min_delta", 0.001)),
         )
@@ -627,28 +761,32 @@ def train(config: dict) -> None:
     print(f"combo_samples={combo_samples}")
     print(f"batch_size={int(train_config.get('batch_size', 32))}")
     print(f"epochs={epochs}")
+    print(f"sampler.enabled={sampler_enabled}")
+    print(f"sampler.strategy={sampler_strategy}")
     print(f"synthetic_samples={synthetic_samples}")
     print(f"synthetic_ratio={synthetic_ratio}")
     print(f"real_ratio={real_ratio}")
     print(f"num_classes={len(class_names)}")
 
-    best_metric = -1.0
+    best_metric = float("inf") if monitor_mode == "min" else -float("inf")
     best_epoch = 0
     history: list[dict[str, float | int]] = []
     history_path = report_dir / "training_history.csv"
     for epoch in range(1, epochs + 1):
         train_loss, _, _ = run_epoch(model, train_loader, criterion, device, optimizer)
         val_loss, val_probs, val_targets = run_epoch(model, val_loader, criterion, device)
-        val_metrics = compute_validation_metrics(val_probs, val_targets, threshold)
+        val_metrics = compute_validation_metrics(val_probs, val_targets, threshold, class_names)
         micro_f1 = val_metrics["micro_f1"]
         macro_f1 = val_metrics["macro_f1"]
         exact_match = val_metrics["exact_match"]
-        over_prediction_rate = val_metrics["over_prediction_rate"]
-        under_prediction_rate = val_metrics["under_prediction_rate"]
-        monitor = str(early_stopping_config.get("monitor", "micro_f1"))
+        double_to_triple_rate = val_metrics["double_to_triple_rate"]
+        source5_over_prediction_rate = val_metrics["source5_over_prediction_rate"]
         current_metric = val_loss if monitor == "val_loss" else val_metrics[monitor]
 
-        if (early_stopping_config.get("mode", "max") == "min" and (best_epoch == 0 or current_metric < best_metric)) or (early_stopping_config.get("mode", "max") != "min" and current_metric > best_metric):
+        if (
+            (monitor_mode == "min" and (best_epoch == 0 or current_metric < best_metric))
+            or (monitor_mode != "min" and (best_epoch == 0 or current_metric > best_metric))
+        ):
             best_metric = current_metric
             best_epoch = epoch
             save_checkpoint(
@@ -681,8 +819,8 @@ def train(config: dict) -> None:
                 "micro_f1": micro_f1,
                 "macro_f1": macro_f1,
                 "exact_match": exact_match,
-                "over_prediction_rate": over_prediction_rate,
-                "under_prediction_rate": under_prediction_rate,
+                "double_to_triple_rate": double_to_triple_rate,
+                "source5_over_prediction_rate": source5_over_prediction_rate,
                 "lr": learning_rate,
             }
         )
@@ -695,9 +833,9 @@ def train(config: dict) -> None:
             f"micro_f1={micro_f1:.4f} "
             f"macro_f1={macro_f1:.4f} "
             f"exact_match={exact_match:.4f} "
-            f"over_prediction_rate={over_prediction_rate:.4f} "
-            f"under_prediction_rate={under_prediction_rate:.4f} "
-            f"learning_rate={learning_rate:.6g}"
+            f"double_to_triple_rate={double_to_triple_rate:.4f} "
+            f"source5_over_prediction_rate={source5_over_prediction_rate:.4f} "
+            f"lr={learning_rate:.6g}"
         )
 
         if early_stopping is not None and early_stopping.step(current_metric):
