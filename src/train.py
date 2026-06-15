@@ -12,8 +12,10 @@ import torch
 import yaml
 from sklearn.metrics import f1_score
 from torch import nn
+import torch.nn.functional as F
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import ConcatDataset, DataLoader, WeightedRandomSampler
+from torch.utils.data import Dataset
 
 from src.build_real_index import build_real_index, discover_class_names
 from src.dataset import RealCsvDataset, SyntheticNpyDataset
@@ -88,6 +90,105 @@ def load_class_names(
         return single_class_names
     return list(DEFAULT_CLASS_NAMES)
 
+
+
+def _label_to_combo_key(label: np.ndarray) -> str:
+    return "[" + ",".join(str(int(value)) for value in label.astype(int).tolist()) + "]"
+
+
+def _dataset_labels(dataset: Dataset) -> np.ndarray:
+    """Return labels for supported datasets without computing STFT features."""
+    if isinstance(dataset, ConcatDataset):
+        parts = [_dataset_labels(child) for child in dataset.datasets]
+        return np.vstack(parts).astype(np.float32)
+    if isinstance(dataset, RealCsvDataset):
+        return np.vstack([np.asarray(sample["label"], dtype=np.float32) for sample in dataset.samples])
+    if isinstance(dataset, SyntheticNpyDataset):
+        return np.vstack([np.load(path).astype(np.float32, copy=False) for path in dataset.y_files])
+    labels: list[np.ndarray] = []
+    for _, y in dataset:
+        labels.append(y.detach().cpu().numpy().astype(np.float32, copy=False))
+    if not labels:
+        raise ValueError("Cannot build sampler or loss weights from an empty dataset")
+    return np.vstack(labels).astype(np.float32)
+
+
+def build_label_balanced_sampler(dataset: Dataset, strategy: str, seed: int) -> WeightedRandomSampler | None:
+    if strategy == "none":
+        return None
+    labels = _dataset_labels(dataset).astype(np.int32)
+    if labels.ndim != 2 or labels.shape[0] == 0:
+        raise ValueError("Expected a non-empty 2D label matrix for weighted sampling")
+    if strategy == "label_combo":
+        keys = [_label_to_combo_key(label) for label in labels]
+        counts = Counter(keys)
+        weights = [1.0 / counts[key] for key in keys]
+    elif strategy == "source_balance":
+        pos_counts = labels.sum(axis=0).astype(np.float64)
+        neg_counts = labels.shape[0] - pos_counts
+        pos_weights = labels.shape[0] / np.maximum(pos_counts, 1.0)
+        neg_weights = labels.shape[0] / np.maximum(neg_counts, 1.0)
+        sample_weights = labels * pos_weights + (1 - labels) * neg_weights
+        weights = sample_weights.mean(axis=1).astype(np.float64).tolist()
+    else:
+        raise ValueError(f"Unsupported sample_weight_strategy: {strategy}")
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+    return WeightedRandomSampler(weights, num_samples=len(weights), replacement=True, generator=generator)
+
+
+def compute_pos_weight(labels: np.ndarray, class_names: list[str], device: torch.device) -> torch.Tensor:
+    labels = labels.astype(np.float32)
+    pos_counts = labels.sum(axis=0)
+    neg_counts = labels.shape[0] - pos_counts
+    pos_weight = neg_counts / np.maximum(pos_counts, 1.0)
+    for class_name, pos_count, neg_count, weight in zip(class_names, pos_counts, neg_counts, pos_weight):
+        print(f"{class_name} pos_count={int(pos_count)} neg_count={int(neg_count)} pos_weight={float(weight):.6g}")
+    return torch.as_tensor(pos_weight, dtype=torch.float32, device=device)
+
+
+class AsymmetricBCEWithLogitsLoss(nn.Module):
+    def __init__(
+        self,
+        pos_weight: torch.Tensor | None = None,
+        fp_penalty: float = 1.5,
+        fn_penalty: float = 1.0,
+    ) -> None:
+        super().__init__()
+        self.register_buffer("pos_weight", pos_weight if pos_weight is not None else None)
+        self.fp_penalty = float(fp_penalty)
+        self.fn_penalty = float(fn_penalty)
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        loss = F.binary_cross_entropy_with_logits(
+            logits,
+            targets,
+            pos_weight=self.pos_weight,
+            reduction="none",
+        )
+        weights = torch.where(
+            targets > 0.5,
+            torch.full_like(targets, self.fn_penalty),
+            torch.full_like(targets, self.fp_penalty),
+        )
+        return (loss * weights).mean()
+
+
+def build_criterion(config: dict, train_labels: np.ndarray, class_names: list[str], device: torch.device) -> nn.Module:
+    loss_config = config.get("loss", {})
+    loss_type = str(loss_config.get("type", "bce"))
+    pos_weight = None
+    if bool(loss_config.get("use_pos_weight", False)):
+        pos_weight = compute_pos_weight(train_labels, class_names, device)
+    if loss_type == "bce":
+        return nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    if loss_type == "asymmetric_bce":
+        return AsymmetricBCEWithLogitsLoss(
+            pos_weight=pos_weight,
+            fp_penalty=float(loss_config.get("fp_penalty", 1.5)),
+            fn_penalty=float(loss_config.get("fn_penalty", 1.0)),
+        )
+    raise ValueError(f"Unsupported loss.type: {loss_type}")
 
 def training_data_config(config: dict) -> tuple[str, float, float]:
     data_mode_config = config.get("training_data", {})
@@ -247,7 +348,15 @@ def build_dataset_and_sampler(
         if real is None:
             raise ValueError(f"real_only mode requires non-empty split={split} samples in real_data.split_file")
         stats["real_samples"] = len(real)
-        return real, None, stats
+        sampler = None
+        train_config = config.get("train", {})
+        if split == "train" and bool(train_config.get("use_weighted_sampler", False)):
+            sampler = build_label_balanced_sampler(
+                real,
+                str(train_config.get("sample_weight_strategy", "label_combo")),
+                int(config.get("seed", 42)),
+            )
+        return real, sampler, stats
 
     if split not in {"train", "val"}:
         synthetic = SyntheticNpyDataset(config.get("data", {}).get("mixed_dir", "data/mixed"), split, config)
@@ -272,7 +381,15 @@ def build_dataset_and_sampler(
     dataset = ConcatDataset([synthetic, real])
     sampler = None
     if split == "train":
-        sampler = _weighted_sampler(len(synthetic), len(real), synthetic_ratio, real_ratio, int(config.get("seed", 42)))
+        train_config = config.get("train", {})
+        if bool(train_config.get("use_weighted_sampler", False)):
+            sampler = build_label_balanced_sampler(
+                dataset,
+                str(train_config.get("sample_weight_strategy", "label_combo")),
+                int(config.get("seed", 42)),
+            )
+        else:
+            sampler = _weighted_sampler(len(synthetic), len(real), synthetic_ratio, real_ratio, int(config.get("seed", 42)))
     return dataset, sampler, stats
 
 
@@ -342,12 +459,19 @@ def run_epoch(
     return total_loss / total_items, np.vstack(all_probs), np.vstack(all_targets)
 
 
-def compute_f1(probs: np.ndarray, targets: np.ndarray, threshold: float) -> tuple[float, float]:
+def compute_validation_metrics(probs: np.ndarray, targets: np.ndarray, threshold: float) -> dict[str, float]:
     preds = (probs >= threshold).astype(np.int32)
     targets = targets.astype(np.int32)
-    micro = f1_score(targets, preds, average="micro", zero_division=0)
-    macro = f1_score(targets, preds, average="macro", zero_division=0)
-    return float(micro), float(macro)
+    exact_matches = np.all(preds == targets, axis=1)
+    over_predictions = np.any(preds > targets, axis=1)
+    under_predictions = np.any(preds < targets, axis=1)
+    return {
+        "micro_f1": float(f1_score(targets, preds, average="micro", zero_division=0)),
+        "macro_f1": float(f1_score(targets, preds, average="macro", zero_division=0)),
+        "exact_match": float(exact_matches.mean()) if len(exact_matches) else 0.0,
+        "over_prediction_rate": float(over_predictions.mean()) if len(over_predictions) else 0.0,
+        "under_prediction_rate": float(under_predictions.mean()) if len(under_predictions) else 0.0,
+    }
 
 
 class EarlyStopping:
@@ -383,7 +507,7 @@ class EarlyStopping:
 def save_training_history(path: str | Path, history: list[dict[str, float | int]]) -> None:
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = ["epoch", "train_loss", "val_loss", "micro_f1", "macro_f1", "lr"]
+    fieldnames = ["epoch", "train_loss", "val_loss", "micro_f1", "macro_f1", "exact_match", "over_prediction_rate", "under_prediction_rate", "lr"]
     with output_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
@@ -454,7 +578,8 @@ def train(config: dict) -> None:
     )
 
     model = NoiseCNN(num_classes=len(class_names)).to(device)
-    criterion = nn.BCEWithLogitsLoss()
+    train_labels = _dataset_labels(train_dataset)
+    criterion = build_criterion(config, train_labels, class_names, device)
     optimizer = torch.optim.Adam(model.parameters(), lr=float(train_config.get("lr", 1e-3)))
     threshold = float(train_config.get("threshold", 0.5))
     epochs = int(train_config.get("epochs", 200))
@@ -466,7 +591,7 @@ def train(config: dict) -> None:
             raise ValueError(f"Unsupported scheduler type: {scheduler_type}")
         scheduler = ReduceLROnPlateau(
             optimizer,
-            mode="max",
+            mode=str(early_stopping_config.get("mode", "max")),
             factor=float(scheduler_config.get("factor", 0.5)),
             patience=int(scheduler_config.get("patience", 5)),
         )
@@ -474,7 +599,8 @@ def train(config: dict) -> None:
     early_stopping = None
     if bool(early_stopping_config.get("enabled", False)):
         monitor = str(early_stopping_config.get("monitor", "micro_f1"))
-        if monitor != "micro_f1":
+        supported_monitors = {"val_loss", "micro_f1", "macro_f1", "exact_match", "over_prediction_rate", "under_prediction_rate"}
+        if monitor not in supported_monitors:
             raise ValueError(f"Unsupported early stopping monitor: {monitor}")
         early_stopping = EarlyStopping(
             mode=str(early_stopping_config.get("mode", "max")),
@@ -513,10 +639,17 @@ def train(config: dict) -> None:
     for epoch in range(1, epochs + 1):
         train_loss, _, _ = run_epoch(model, train_loader, criterion, device, optimizer)
         val_loss, val_probs, val_targets = run_epoch(model, val_loader, criterion, device)
-        micro_f1, macro_f1 = compute_f1(val_probs, val_targets, threshold)
+        val_metrics = compute_validation_metrics(val_probs, val_targets, threshold)
+        micro_f1 = val_metrics["micro_f1"]
+        macro_f1 = val_metrics["macro_f1"]
+        exact_match = val_metrics["exact_match"]
+        over_prediction_rate = val_metrics["over_prediction_rate"]
+        under_prediction_rate = val_metrics["under_prediction_rate"]
+        monitor = str(early_stopping_config.get("monitor", "micro_f1"))
+        current_metric = val_loss if monitor == "val_loss" else val_metrics[monitor]
 
-        if micro_f1 > best_metric:
-            best_metric = micro_f1
+        if (early_stopping_config.get("mode", "max") == "min" and (best_epoch == 0 or current_metric < best_metric)) or (early_stopping_config.get("mode", "max") != "min" and current_metric > best_metric):
+            best_metric = current_metric
             best_epoch = epoch
             save_checkpoint(
                 checkpoint_dir / "best.pt",
@@ -528,7 +661,7 @@ def train(config: dict) -> None:
             )
 
         if scheduler is not None:
-            scheduler.step(micro_f1)
+            scheduler.step(current_metric)
         learning_rate = float(optimizer.param_groups[0]["lr"])
 
         save_checkpoint(
@@ -547,6 +680,9 @@ def train(config: dict) -> None:
                 "val_loss": val_loss,
                 "micro_f1": micro_f1,
                 "macro_f1": macro_f1,
+                "exact_match": exact_match,
+                "over_prediction_rate": over_prediction_rate,
+                "under_prediction_rate": under_prediction_rate,
                 "lr": learning_rate,
             }
         )
@@ -558,12 +694,15 @@ def train(config: dict) -> None:
             f"val_loss={val_loss:.4f} "
             f"micro_f1={micro_f1:.4f} "
             f"macro_f1={macro_f1:.4f} "
+            f"exact_match={exact_match:.4f} "
+            f"over_prediction_rate={over_prediction_rate:.4f} "
+            f"under_prediction_rate={under_prediction_rate:.4f} "
             f"learning_rate={learning_rate:.6g}"
         )
 
-        if early_stopping is not None and early_stopping.step(micro_f1):
+        if early_stopping is not None and early_stopping.step(current_metric):
             print("Early stopping triggered.")
-            print(f"Best micro_f1={best_metric:.4f}")
+            print(f"Best {monitor}={best_metric:.4f}")
             print(f"Best epoch={best_epoch}")
             break
 

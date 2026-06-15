@@ -50,12 +50,19 @@ train:
   epochs: 200
   batch_size: 32
   threshold: 0.5
+  use_weighted_sampler: true
+  sample_weight_strategy: label_combo
   lr: 0.001
   device: auto
   num_workers: 0
+loss:
+  type: asymmetric_bce
+  use_pos_weight: true
+  fp_penalty: 1.8
+  fn_penalty: 1.0
 early_stopping:
   enabled: true
-  monitor: micro_f1
+  monitor: exact_match
   mode: max
   patience: 15
   min_delta: 0.001

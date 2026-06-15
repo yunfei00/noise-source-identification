@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import argparse
 import csv
+import itertools
+import json
 from pathlib import Path
 
 import numpy as np
 import torch
 
-from src.evaluate import collect_probabilities, compute_metrics, _real_loader_and_groups
+from src.evaluate import collect_probabilities, compute_metrics, thresholds_for_report, _real_loader_and_groups
 from src.infer import load_checkpoint
 from src.model_cnn import NoiseCNN
 from src.train import make_loader, resolve_device
@@ -63,7 +65,7 @@ def search_thresholds(
     real_split: str | None = None,
     metric: str = "exact_match",
     start: float = 0.3,
-    end: float = 0.8,
+    end: float = 0.9,
     step: float = 0.05,
     output: str | Path = "outputs/reports/threshold_search.csv",
     device_name: str = "auto",
@@ -73,11 +75,12 @@ def search_thresholds(
 
     probs, targets, class_names, eval_split = _load_probs_and_targets(model_path, split, real_split, device_name)
     rows: list[dict[str, str]] = []
-    for threshold in threshold_values(start, end, step):
-        metrics = compute_metrics(probs, targets, class_names, threshold)
+    grid = threshold_values(start, end, step)
+    for threshold_combo in itertools.product(grid, repeat=len(class_names)):
+        metrics = compute_metrics(probs, targets, class_names, np.asarray(threshold_combo, dtype=np.float32))
         overall = metrics["overall"]
         row = {
-            "threshold": f"{threshold:.10g}",
+            "thresholds": json.dumps(thresholds_for_report(threshold_combo, class_names), sort_keys=True),
             "metric": metric,
             "metric_value": f"{overall[metric]:.10g}",
             "micro_f1": f"{overall['micro_f1']:.10g}",
@@ -87,12 +90,14 @@ def search_thresholds(
             "over_prediction_rate": f"{overall['over_prediction_rate']:.10g}",
             "under_prediction_rate": f"{overall['under_prediction_rate']:.10g}",
         }
+        row.update({class_name: f"{value:.10g}" for class_name, value in zip(class_names, threshold_combo)})
         rows.append(row)
 
     output_path = Path(output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [
-        "threshold",
+        *class_names,
+        "thresholds",
         "metric",
         "metric_value",
         "micro_f1",
@@ -108,11 +113,24 @@ def search_thresholds(
         writer.writerows(rows)
 
     best = max(rows, key=lambda row: float(row["metric_value"])) if rows else None
+    best_thresholds_path = output_path.with_name("best_thresholds.json")
+    if best is not None:
+        best_payload = {
+            "model": str(model_path),
+            "split": eval_split,
+            "metric": metric,
+            "metric_value": float(best["metric_value"]),
+            "thresholds": {class_name: float(best[class_name]) for class_name in class_names},
+        }
+        with best_thresholds_path.open("w", encoding="utf-8") as handle:
+            json.dump(best_payload, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
     print(f"model={model_path}")
     print(f"split={eval_split} samples={len(targets)}")
     print(f"metric={metric}")
     if best is not None:
-        print(f"best_threshold={best['threshold']} best_{metric}={best['metric_value']}")
+        print(f"best_thresholds={best['thresholds']} best_{metric}={best['metric_value']}")
+        print(f"best_thresholds_json={best_thresholds_path}")
     print(f"output={output_path}")
     return rows
 
@@ -124,7 +142,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--real-split", choices=("train", "val", "test"), help="Evaluate a real_dataset_split.csv split.")
     parser.add_argument("--metric", choices=METRIC_KEYS, default="exact_match", help="Metric to maximize.")
     parser.add_argument("--start", type=float, default=0.3, help="Inclusive start threshold.")
-    parser.add_argument("--end", type=float, default=0.8, help="Inclusive end threshold.")
+    parser.add_argument("--end", type=float, default=0.9, help="Inclusive end threshold.")
     parser.add_argument("--step", type=float, default=0.05, help="Threshold step size.")
     parser.add_argument("--output", type=Path, default=Path("outputs/reports/threshold_search.csv"), help="Output CSV path.")
     parser.add_argument("--device", default="auto", help="Device: auto, cpu, or cuda.")
