@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 from collections import defaultdict
 from pathlib import Path
@@ -17,6 +18,30 @@ from src.train import make_loader, prepare_real_split, resolve_device
 
 DEFAULT_THRESHOLDS = (0.3, 0.4, 0.5, 0.6, 0.7)
 
+
+
+def normalize_thresholds(threshold: float | list[float] | np.ndarray, num_classes: int) -> np.ndarray:
+    values = np.asarray(threshold, dtype=np.float32)
+    if values.ndim == 0:
+        return np.full(num_classes, float(values), dtype=np.float32)
+    if values.shape != (num_classes,):
+        raise ValueError(f"Expected {num_classes} threshold(s), got shape {values.shape}")
+    return values
+
+
+def thresholds_for_report(threshold: float | list[float] | np.ndarray, class_names: list[str]) -> float | dict[str, float]:
+    values = normalize_thresholds(threshold, len(class_names))
+    if np.allclose(values, values[0]):
+        return float(values[0])
+    return {class_name: float(value) for class_name, value in zip(class_names, values)}
+
+
+def load_thresholds_json(path: str | Path, class_names: list[str]) -> np.ndarray:
+    with Path(path).open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if "thresholds" in payload and isinstance(payload["thresholds"], dict):
+        payload = payload["thresholds"]
+    return np.asarray([float(payload[class_name]) for class_name in class_names], dtype=np.float32)
 
 def collect_probabilities(
     model: torch.nn.Module,
@@ -43,7 +68,7 @@ def compute_metrics(
     probs: np.ndarray,
     targets: np.ndarray,
     class_names: list[str],
-    threshold: float,
+    threshold: float | list[float] | np.ndarray,
 ) -> dict:
     """Compute per-class and aggregate multi-label metrics at one threshold."""
     if probs.shape != targets.shape:
@@ -53,7 +78,8 @@ def compute_metrics(
             f"Expected predictions with {len(class_names)} classes, got shape {probs.shape}"
         )
 
-    preds = (probs >= threshold).astype(np.int32)
+    threshold_values = normalize_thresholds(threshold, len(class_names))
+    preds = (probs >= threshold_values.reshape(1, -1)).astype(np.int32)
     precision, recall, f1, support = precision_recall_fscore_support(
         targets,
         preds,
@@ -83,7 +109,7 @@ def compute_metrics(
         "over_prediction_rate": float(over_predictions.mean()) if len(over_predictions) else 0.0,
         "under_prediction_rate": float(under_predictions.mean()) if len(under_predictions) else 0.0,
     }
-    return {"threshold": threshold, "per_class": per_class, "overall": overall}
+    return {"threshold": thresholds_for_report(threshold_values, class_names), "per_class": per_class, "overall": overall}
 
 
 def label_to_text(label: np.ndarray) -> str:
@@ -102,10 +128,11 @@ def compute_real_breakdowns(
     targets: np.ndarray,
     groups: list[str],
     class_names: list[str],
-    threshold: float,
+    threshold: float | list[float] | np.ndarray,
     condition_paths: list[str] | None = None,
 ) -> dict:
-    preds = (probs >= threshold).astype(np.int32)
+    threshold_values = normalize_thresholds(threshold, len(class_names))
+    preds = (probs >= threshold_values.reshape(1, -1)).astype(np.int32)
     exact = np.all(preds == targets, axis=1)
     group_accuracy: dict[str, dict[str, float | int]] = {}
     for group in sorted(set(groups)):
@@ -157,12 +184,32 @@ def compute_real_breakdowns(
             }
             for ratio, indices in sorted(ratio_indices.items())
         }
+    combo_confusion: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    requested_true_labels = {"[0,1,0]", "[0,1,1]", "[1,1,0]", "[1,0,1]"}
+    for target, pred in zip(targets, preds):
+        true_label = label_to_text(target)
+        if true_label in requested_true_labels:
+            combo_confusion[true_label][label_to_text(pred)] += 1
+
+    source_1_index = class_names.index("source_1") if "source_1" in class_names else 0
+    no_source_1 = targets[:, source_1_index] == 0
+    source_1_false_positive_rate = (
+        float((preds[no_source_1, source_1_index] == 1).mean()) if np.any(no_source_1) else 0.0
+    )
+    true_source_counts = targets.sum(axis=1)
+    true_double = true_source_counts == 2
+    predicted_triple = preds.sum(axis=1) == len(class_names)
+    double_to_triple_rate = float(predicted_triple[true_double].mean()) if np.any(true_double) else 0.0
+
     return {
-        "threshold": float(threshold),
+        "threshold": thresholds_for_report(threshold_values, class_names),
         "group_accuracy": group_accuracy,
         "label_accuracy": label_accuracy,
         "per_source": per_source,
         "ratio_accuracy": ratio_accuracy,
+        "combo_confusion": {true: dict(pred_counts) for true, pred_counts in sorted(combo_confusion.items())},
+        "source_1_false_positive_rate": source_1_false_positive_rate,
+        "double_source_predicted_as_triple_rate": double_to_triple_rate,
     }
 
 
@@ -212,6 +259,12 @@ def print_real_breakdowns(breakdowns: dict) -> None:
         print("\nreal ratio accuracy:")
         for ratio, metrics in breakdowns["ratio_accuracy"].items():
             print(f"  {ratio}: accuracy={metrics['accuracy']:.4f} samples={metrics['num_samples']}")
+    print(f"\nsource_1_false_positive_rate={breakdowns.get('source_1_false_positive_rate', 0.0):.4f}")
+    print(f"double_source_predicted_as_triple_rate={breakdowns.get('double_source_predicted_as_triple_rate', 0.0):.4f}")
+    if breakdowns.get("combo_confusion"):
+        print("\ncombo confusion:")
+        for true_label, pred_counts in breakdowns["combo_confusion"].items():
+            print(f"  true {true_label}: {pred_counts}")
 
 
 def _real_loader_and_groups(config: dict, class_names: list[str], real_split: str) -> tuple[DataLoader, list[str], list[str]]:
@@ -237,6 +290,52 @@ def _real_loader_and_groups(config: dict, class_names: list[str], real_split: st
     return loader, groups, condition_paths
 
 
+
+def write_error_analysis(
+    path: str | Path,
+    probs: np.ndarray,
+    targets: np.ndarray,
+    groups: list[str],
+    condition_paths: list[str],
+    class_names: list[str],
+    threshold: float | list[float] | np.ndarray,
+) -> None:
+    threshold_values = normalize_thresholds(threshold, len(class_names))
+    preds = (probs >= threshold_values.reshape(1, -1)).astype(np.int32)
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "index",
+        "group",
+        "condition_path",
+        "true_label",
+        "pred_label",
+        "exact_match",
+        "over_prediction",
+        "under_prediction",
+    ]
+    fieldnames.extend(f"prob_{name}" for name in class_names)
+    fieldnames.extend(f"true_{name}" for name in class_names)
+    fieldnames.extend(f"pred_{name}" for name in class_names)
+    with output_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for index, (prob, target, pred) in enumerate(zip(probs, targets, preds)):
+            row = {
+                "index": index,
+                "group": groups[index] if index < len(groups) else "",
+                "condition_path": condition_paths[index] if index < len(condition_paths) else "",
+                "true_label": label_to_text(target),
+                "pred_label": label_to_text(pred),
+                "exact_match": int(np.all(pred == target)),
+                "over_prediction": int(np.any(pred > target)),
+                "under_prediction": int(np.any(pred < target)),
+            }
+            row.update({f"prob_{name}": f"{float(value):.10g}" for name, value in zip(class_names, prob)})
+            row.update({f"true_{name}": int(value) for name, value in zip(class_names, target)})
+            row.update({f"pred_{name}": int(value) for name, value in zip(class_names, pred)})
+            writer.writerow(row)
+
 def evaluate(
     model_path: str | Path,
     split: str = "test",
@@ -244,6 +343,7 @@ def evaluate(
     report_path: str | Path | None = None,
     real_split: str | None = None,
     threshold: float | None = None,
+    thresholds_json: str | Path | None = None,
 ) -> dict:
     """Evaluate a checkpoint on a synthesized split or a real dataset split."""
     device = resolve_device(device_name)
@@ -274,7 +374,10 @@ def evaluate(
         compute_metrics(probs, targets, class_names, threshold) for threshold in DEFAULT_THRESHOLDS
     ]
 
-    selected_threshold = float(config.get("train", {}).get("threshold", 0.5) if threshold is None else threshold)
+    if thresholds_json is not None:
+        selected_threshold = load_thresholds_json(thresholds_json, class_names)
+    else:
+        selected_threshold = float(config.get("train", {}).get("threshold", 0.5) if threshold is None else threshold)
     real_breakdowns = None
     if groups is not None:
         real_breakdowns = compute_real_breakdowns(probs, targets, groups, class_names, selected_threshold, condition_paths)
@@ -285,11 +388,20 @@ def evaluate(
         "split": eval_split,
         "num_samples": int(targets.shape[0]),
         "class_names": class_names,
-        "selected_threshold": selected_threshold,
+        "selected_threshold": thresholds_for_report(selected_threshold, class_names),
         "thresholds": metrics_by_threshold,
     }
     if real_breakdowns is not None:
         report["real_breakdowns"] = real_breakdowns
+        write_error_analysis(
+            Path(output_path).with_name("error_analysis.csv"),
+            probs,
+            targets,
+            groups or [],
+            condition_paths or [],
+            class_names,
+            selected_threshold,
+        )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8") as handle:
         json.dump(report, handle, ensure_ascii=False, indent=2)
@@ -313,12 +425,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="auto", help="Device: auto, cpu, or cuda.")
     parser.add_argument("--report", type=Path, help="Report path (default: outputs/reports/eval_report.json).")
     parser.add_argument("--threshold", type=float, help="Threshold for real-data breakdowns (default: config train.threshold).")
+    parser.add_argument("--thresholds-json", type=Path, help="Per-class thresholds JSON from search_thresholds.")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    evaluate(args.model, args.split, args.device, args.report, args.real_split, args.threshold)
+    evaluate(args.model, args.split, args.device, args.report, args.real_split, args.threshold, args.thresholds_json)
 
 
 if __name__ == "__main__":
