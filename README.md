@@ -94,6 +94,17 @@ python -m src.split_real_dataset \
   --output outputs/reports/real_dataset_split.csv
 ```
 
+If `balanced_train.enabled: true` is used, create the quota-selected training split configured in
+`configs/train.yaml`:
+
+```bash
+python -m src.create_balanced_split \
+  --input outputs/reports/real_dataset_split.csv \
+  --output outputs/reports/real_dataset_split_balanced.csv \
+  --quota 100=2100,010=2100,001=2100,110=5000,101=3500,011=3500,111=3000 \
+  --seed 42
+```
+
 ```bash
 python -m src.train --config configs/train.yaml
 ```
@@ -127,15 +138,54 @@ real_data:
   single_dir: data/single
   combo_dir: data/real_dataset
   index_file: outputs/reports/real_dataset_index.csv
-  split_file: outputs/reports/real_dataset_split.csv
+  split_file: outputs/reports/real_dataset_split_balanced.csv
 ```
 
 In `real_only` mode:
 
 - `data/mixed` is not used.
 - `data.num_samples` is not used.
-- Samples are loaded lazily from CSV files listed in `real_dataset_split.csv`.
+- Samples are loaded lazily from CSV files listed in the configured `real_data.split_file`.
 - An empty split file raises a clear training error.
+
+## How training samples are fixed
+
+Training data selection is controlled by the generated CSV split file, not by the README text:
+
+1. `src.train` reads `training_data.mode`. With `real_only`, it sets the synthetic ratio to `0` and the real ratio to `1`.
+2. `src.train` rebuilds `outputs/reports/real_dataset_index.csv` from `real_data.single_dir` and `real_data.combo_dir`.
+3. The base split file `outputs/reports/real_dataset_split.csv` assigns each indexed CSV to `train`, `val`, or `test`.
+4. When `balanced_train.enabled: true`, `src.train` also creates `outputs/reports/real_dataset_split_balanced.csv` from the configured label-combination quotas.
+5. During training, `RealCsvDataset` loads only rows for the requested split. For `train`, if the split file has `selected_for_train`, only true rows are used.
+
+Therefore the exact training set is:
+
+```text
+outputs/reports/real_dataset_split_balanced.csv
+where split == train and selected_for_train == true
+```
+
+To inspect the exact files that will be trained on:
+
+```bash
+python - <<'PY'
+import csv
+from collections import Counter
+
+split_file = "outputs/reports/real_dataset_split_balanced.csv"
+counts = Counter()
+with open(split_file, newline="", encoding="utf-8") as handle:
+    for row in csv.DictReader(handle):
+        selected = row.get("selected_for_train", "").strip().lower() in {"true", "1", "yes", "y"}
+        if row.get("split") == "train" and selected:
+            counts[row["label"]] += 1
+            print(row["file"])
+
+print("selected train label counts:")
+for label, count in sorted(counts.items()):
+    print(label, count)
+PY
+```
 
 ## Outputs
 
