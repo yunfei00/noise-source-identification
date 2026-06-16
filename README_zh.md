@@ -298,3 +298,21 @@ outputs/reports/combo_confusion.csv
 - `outputs/reports/combo_confusion.csv`：组合混淆矩阵。
 - `outputs/reports/threshold_search.csv`：阈值搜索结果。
 - `outputs/reports/best_thresholds.json`：最佳 per-class 阈值。
+
+## 推荐训练配比
+
+当前推荐训练配额：
+
+- `100`：2100
+- `010`：2100
+- `001`：2100
+- `110`：5000
+- `101`：3500
+- `011`：3500
+- `111`：3000
+
+说明：
+
+- 训练集可以不使用全部数据。
+- 验证集和测试集保持真实分布。
+- 当某个 source 过预测严重时，应降低包含该 source 的组合占比，提高不包含该 source 的组合权重。

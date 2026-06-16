@@ -150,6 +150,9 @@ class RealCsvDataset(SyntheticNpyDataset):
             for row in reader:
                 if split is not None and row.get("split") != split:
                     continue
+                if split == "train" and "selected_for_train" in row:
+                    if row.get("selected_for_train", "").strip().lower() not in {"true", "1", "yes", "y"}:
+                        continue
                 label = parse_label_text(row["label"])
                 if label.shape[0] != len(self.class_names):
                     raise ValueError(
