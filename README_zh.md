@@ -207,11 +207,21 @@ python -m src.split_real_dataset \
   --output outputs/reports/real_dataset_split.csv
 ```
 
+如果 `configs/train.yaml` 中启用了 `balanced_train.enabled: true`，继续生成按配额筛选后的训练 split：
+
+```bash
+python -m src.create_balanced_split \
+  --input outputs/reports/real_dataset_split.csv \
+  --output outputs/reports/real_dataset_split_balanced.csv \
+  --quota 100=2100,010=2100,001=2100,110=5000,101=3500,011=3500,111=3000 \
+  --seed 42
+```
+
 分析标签分布：
 
 ```bash
 python -m src.analyze_label_distribution \
-  --split outputs/reports/real_dataset_split.csv \
+  --split outputs/reports/real_dataset_split_balanced.csv \
   --output outputs/reports/label_distribution.json
 ```
 
@@ -219,6 +229,58 @@ python -m src.analyze_label_distribution \
 
 ```bash
 python -m src.train --config configs/train.yaml
+```
+
+## 如何确认训练数据就是指定的数据
+
+训练时最终使用的不是 README 文字本身，而是 `configs/train.yaml` 指向的 split CSV 文件。当前配置中：
+
+```yaml
+training_data:
+  mode: real_only
+
+real_data:
+  single_dir: data/single
+  combo_dir: data/real_dataset
+  index_file: outputs/reports/real_dataset_index.csv
+  split_file: outputs/reports/real_dataset_split_balanced.csv
+```
+
+实际流程如下：
+
+1. `training_data.mode: real_only` 表示只使用真实 CSV，不使用 `data/mixed` 合成数据。
+2. 训练前会从 `data/single` 和 `data/real_dataset` 递归扫描 CSV，生成 `outputs/reports/real_dataset_index.csv`。
+3. `outputs/reports/real_dataset_split.csv` 负责把样本分成 `train`、`val`、`test`。
+4. 启用 `balanced_train.enabled: true` 后，会根据 `balanced_train.quota` 生成 `outputs/reports/real_dataset_split_balanced.csv`，并给训练样本写入 `selected_for_train`。
+5. 训练阶段只加载 `split == train` 的行；如果存在 `selected_for_train` 列，还会继续只保留 `selected_for_train == true` 的行。
+
+因此，当前真正进入训练的数据就是：
+
+```text
+outputs/reports/real_dataset_split_balanced.csv
+中 split == train 且 selected_for_train == true 的行
+```
+
+可以用下面命令打印实际训练文件和每种标签组合数量：
+
+```bash
+python - <<'PY'
+import csv
+from collections import Counter
+
+split_file = "outputs/reports/real_dataset_split_balanced.csv"
+counts = Counter()
+with open(split_file, newline="", encoding="utf-8") as handle:
+    for row in csv.DictReader(handle):
+        selected = row.get("selected_for_train", "").strip().lower() in {"true", "1", "yes", "y"}
+        if row.get("split") == "train" and selected:
+            counts[row["label"]] += 1
+            print(row["file"])
+
+print("selected train label counts:")
+for label, count in sorted(counts.items()):
+    print(label, count)
+PY
 ```
 
 统一阈值评估：

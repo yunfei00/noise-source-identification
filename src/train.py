@@ -18,6 +18,7 @@ from torch.utils.data import ConcatDataset, DataLoader, WeightedRandomSampler
 from torch.utils.data import Dataset
 
 from src.build_real_index import build_real_index, discover_class_names
+from src.create_balanced_split import create_balanced_split
 from src.dataset import RealCsvDataset, SyntheticNpyDataset
 from src.model_cnn import NoiseCNN
 from src.split_real_dataset import split_real_dataset
@@ -291,7 +292,7 @@ def prepare_real_split(config: dict, class_names: list[str]) -> Path | None:
     single_dir = Path(real_data_config.get("single_dir", data_config.get("single_dir", "data/single")))
     combo_dir = Path(real_data_config.get("combo_dir", "data/real_dataset"))
     index_path = Path(real_data_config.get("index_file", report_dir / "real_dataset_index.csv"))
-    split_path = Path(real_data_config.get("split_file", report_dir / "real_dataset_split.csv"))
+    requested_split_path = Path(real_data_config.get("split_file", report_dir / "real_dataset_split.csv"))
 
     rebuild_real_files = mode == "real_only"
 
@@ -311,6 +312,39 @@ def prepare_real_split(config: dict, class_names: list[str]) -> Path | None:
 
     balanced_config = config.get("balanced_train", {})
     balanced_enabled = bool(balanced_config.get("enabled", False))
+    if balanced_enabled:
+        quota = balanced_config.get("quota", {})
+        if not isinstance(quota, dict) or not quota:
+            raise ValueError("balanced_train.enabled is true, so balanced_train.quota must be a non-empty mapping")
+        base_split_path = Path(balanced_config.get("input_split_file", report_dir / "real_dataset_split.csv"))
+        split_path = Path(balanced_config.get("output_split_file", requested_split_path))
+        if rebuild_real_files or not base_split_path.exists():
+            if rebuild_real_files:
+                print(f"real_only mode splits all indexed real samples; rebuilding {base_split_path}")
+            else:
+                print(f"real dataset base split not found; building {base_split_path}")
+            split_real_dataset(
+                index=index_path,
+                output=base_split_path,
+                train_ratio=float(legacy_split_config.get("train_ratio", 0.7)),
+                val_ratio=float(legacy_split_config.get("val_ratio", 0.15)),
+                test_ratio=float(legacy_split_config.get("test_ratio", 0.15)),
+                seed=int(legacy_split_config.get("seed", config.get("seed", 42))),
+            )
+        if rebuild_real_files or not split_path.exists():
+            if rebuild_real_files:
+                print(f"real_only mode applies balanced train quotas; rebuilding {split_path}")
+            else:
+                print(f"balanced train split not found; building {split_path}")
+            create_balanced_split(
+                input_path=base_split_path,
+                output_path=split_path,
+                quota={str(combo): int(count) for combo, count in quota.items()},
+                seed=int(balanced_config.get("seed", config.get("seed", 42))),
+            )
+        return split_path
+
+    split_path = requested_split_path
     if not split_path.exists():
         if rebuild_real_files:
             print(f"real_only mode splits all indexed real samples; rebuilding {split_path}")
@@ -324,7 +358,7 @@ def prepare_real_split(config: dict, class_names: list[str]) -> Path | None:
             test_ratio=float(legacy_split_config.get("test_ratio", 0.15)),
             seed=int(legacy_split_config.get("seed", config.get("seed", 42))),
         )
-    elif rebuild_real_files and not balanced_enabled:
+    elif rebuild_real_files:
         print(f"real_only mode using existing real split file: {split_path}")
     return split_path
 
