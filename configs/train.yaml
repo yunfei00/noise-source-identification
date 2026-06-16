@@ -34,6 +34,19 @@ augmentation:
   source_dropout_prob: 0.0
 training_data:
   mode: real_only
+balanced_train:
+  enabled: true
+  input_split_file: outputs/reports/real_dataset_split.csv
+  output_split_file: outputs/reports/real_dataset_split_balanced.csv
+  quota:
+    "100": 2100
+    "010": 2100
+    "001": 2100
+    "110": 5000
+    "101": 3500
+    "011": 3500
+    "111": 3000
+  seed: 42
 sampler:
   enabled: true
   strategy: label_combo
@@ -41,7 +54,7 @@ real_data:
   single_dir: data/single
   combo_dir: data/real_dataset
   index_file: outputs/reports/real_dataset_index.csv
-  split_file: outputs/reports/real_dataset_split.csv
+  split_file: outputs/reports/real_dataset_split_balanced.csv
 real_split:
   enabled: true
   train_ratio: 0.7
@@ -59,12 +72,12 @@ train:
 loss:
   type: asymmetric_bce
   use_pos_weight: false
-  fp_penalty: 2.0
+  fp_penalty: 2.5
   fn_penalty: 1.0
   class_fp_penalty:
-    source_1: 1.5
-    source_3: 1.5
-    source_5: 3.0
+    source_1: 1.2
+    source_3: 1.2
+    source_5: 5.0
 early_stopping:
   enabled: true
   monitor: exact_match

@@ -69,6 +69,7 @@ def search_thresholds(
     step: float = 0.05,
     output: str | Path = "outputs/reports/threshold_search.csv",
     device_name: str = "auto",
+    min_source5_threshold: float | None = None,
 ) -> list[dict[str, str]]:
     if metric not in METRIC_KEYS:
         raise ValueError(f"metric must be one of {', '.join(METRIC_KEYS)}")
@@ -77,6 +78,9 @@ def search_thresholds(
     rows: list[dict[str, str]] = []
     grid = threshold_values(start, end, step)
     for threshold_combo in itertools.product(grid, repeat=len(class_names)):
+        if min_source5_threshold is not None and "source_5" in class_names:
+            if threshold_combo[class_names.index("source_5")] < min_source5_threshold:
+                continue
         metrics = compute_metrics(probs, targets, class_names, np.asarray(threshold_combo, dtype=np.float32))
         overall = metrics["overall"]
         row = {
@@ -169,6 +173,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--step", type=float, default=0.05, help="Threshold step size.")
     parser.add_argument("--output", type=Path, default=Path("outputs/reports/threshold_search.csv"), help="Output CSV path.")
     parser.add_argument("--device", default="auto", help="Device: auto, cpu, or cuda.")
+    parser.add_argument("--min-source5-threshold", type=float, help="Skip threshold combinations where source_5 is below this value.")
     return parser.parse_args()
 
 
@@ -184,6 +189,7 @@ def main() -> None:
         step=args.step,
         output=args.output,
         device_name=args.device,
+        min_source5_threshold=args.min_source5_threshold,
     )
 
 

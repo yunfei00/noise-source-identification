@@ -298,3 +298,49 @@ outputs/reports/combo_confusion.csv
 - `outputs/reports/combo_confusion.csv`：组合混淆矩阵。
 - `outputs/reports/threshold_search.csv`：阈值搜索结果。
 - `outputs/reports/best_thresholds.json`：最佳 per-class 阈值。
+
+## 推荐训练配比
+
+当前推荐训练配额：
+
+- `100`：2100
+- `010`：2100
+- `001`：2100
+- `110`：5000
+- `101`：3500
+- `011`：3500
+- `111`：3000
+
+说明：
+
+- 训练集可以不使用全部数据。
+- 验证集和测试集保持真实分布。
+- 当某个 source 过预测严重时，应降低包含该 source 的组合占比，提高不包含该 source 的组合权重。
+
+### 如何确保训练数据就是指定配额
+
+训练数据不是靠 sampler 随机“近似”成上述比例，而是在训练前先生成一个带标记的 balanced split 文件：
+
+```bash
+python -m src.create_balanced_split \
+  --input outputs/reports/real_dataset_split.csv \
+  --output outputs/reports/real_dataset_split_balanced.csv \
+  --quota 100=2100,010=2100,001=2100,110=5000,101=3500,011=3500,111=3000 \
+  --seed 42
+```
+
+实现方式：
+
+1. `outputs/reports/real_dataset_split.csv` 仍然保存原始真实 train/val/test 划分。
+2. `create_balanced_split` 只在 `split=train` 的样本里按 quota 抽样。
+3. 输出文件 `outputs/reports/real_dataset_split_balanced.csv` 会新增 `selected_for_train` 字段。
+4. 训练时 `configs/train.yaml` 中的 `real_data.split_file` 指向 `outputs/reports/real_dataset_split_balanced.csv`。
+5. `RealCsvDataset` 读取 `split=train` 时只加载 `selected_for_train=true` 的样本。
+6. `split=val` 和 `split=test` 不检查 `selected_for_train`，因此验证集和测试集仍保持真实分布。
+
+如果使用 `python -m src.train --config configs/train.yaml`，且 `balanced_train.enabled: true`，训练脚本会根据 `balanced_train.input_split_file`、`balanced_train.output_split_file` 和 `balanced_train.quota` 自动重新生成 balanced split，再用该文件训练。
+
+可以通过以下文件确认实际训练配额：
+
+- `outputs/reports/real_dataset_split_balanced.csv`：检查 `split=train` 且 `selected_for_train=true` 的行数。
+- `outputs/reports/balanced_train_summary.json`：检查 `after_train_combo_counts` 是否等于或接近推荐配额，并检查 `source5_positive_ratio_after` 是否下降。
