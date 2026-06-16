@@ -309,7 +309,9 @@ def prepare_real_split(config: dict, class_names: list[str]) -> Path | None:
             include_combo=True,
         )
 
-    if rebuild_real_files or not split_path.exists():
+    balanced_config = config.get("balanced_train", {})
+    balanced_enabled = bool(balanced_config.get("enabled", False))
+    if not split_path.exists():
         if rebuild_real_files:
             print(f"real_only mode splits all indexed real samples; rebuilding {split_path}")
         else:
@@ -322,6 +324,8 @@ def prepare_real_split(config: dict, class_names: list[str]) -> Path | None:
             test_ratio=float(legacy_split_config.get("test_ratio", 0.15)),
             seed=int(legacy_split_config.get("seed", config.get("seed", 42))),
         )
+    elif rebuild_real_files and not balanced_enabled:
+        print(f"real_only mode using existing real split file: {split_path}")
     return split_path
 
 
