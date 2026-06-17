@@ -378,3 +378,64 @@ outputs/reports/combo_confusion.csv
 - 训练集可以不使用全部数据。
 - 验证集和测试集保持真实分布。
 - 当某个 source 过预测严重时，应降低包含该 source 的组合占比，提高不包含该 source 的组合权重。
+
+## source5 过预测诊断流程
+
+当评估结果显示 `source_5` 总是被预测为存在，或 `source5_false_positive_rate` / `source5_over_prediction_rate` 明显偏高时，不要直接继续训练，建议按以下顺序定位根因：
+
+1. **检查 110 -> 111 错误样本的 source5 概率边界**
+
+   重新评估测试集并生成专项分析文件：
+
+   ```bash
+   python -m src.evaluate \
+     --model outputs/checkpoints/best.pt \
+     --real-split test \
+     --threshold 0.5
+   ```
+
+   查看 `outputs/reports/analysis_110_to_111.csv` 和 `outputs/reports/eval_report.json` 中的 `analysis_110_to_111`。重点关注 `source_5_margin = source_5_prob - source_5_threshold`：
+
+   - 如果 margin 普遍很小，说明很多错误只是刚刚越过阈值，优先排查阈值。
+   - 如果 margin 普遍很大，说明模型对错误的 `source_5` 判断非常自信，需要继续排查概率分布、特征能量或训练数据偏差。
+
+2. **执行 per-class threshold search**
+
+   对 `source_1`、`source_3` 在 `0.3 ~ 0.95` 搜索，对 `source_5` 至少从 `0.6` 开始搜索：
+
+   ```bash
+   python -m src.search_thresholds \
+     --model outputs/checkpoints/best.pt \
+     --real-split test \
+     --metric exact_match \
+     --start 0.3 \
+     --end 0.95 \
+     --step 0.05 \
+     --min-source5-threshold 0.6 \
+     --output outputs/reports/threshold_search.csv
+   ```
+
+   结果会按 `exact_match` 从高到低排序保存到 `outputs/reports/threshold_search.csv`，最佳阈值保存到 `outputs/reports/best_thresholds.json`。如果提高 `source_5` 阈值后 `exact_match` 改善且 `double_to_triple_rate`、`source5_false_positive_rate` 下降，说明主要是阈值问题。
+
+3. **统计原始信号与频谱能量特征**
+
+   对训练集按 group 统计原始信号、FFT 和 STFT 特征：
+
+   ```bash
+   python -m src.feature_statistics \
+     --split outputs/reports/real_dataset_split.csv \
+     --split-name train \
+     --output outputs/reports/feature_statistics.csv \
+     --max-samples-per-group 500
+   ```
+
+   明细输出为 `outputs/reports/feature_statistics.csv`，按 group 聚合结果输出为 `outputs/reports/feature_statistics_summary.json`。重点查看 summary 中的 `source_energy_comparison`，比较 `source_1_only`、`source_3_only`、`source_5_only` 的 `signal_rms_mean`、`signal_energy_mean`、`fft_total_energy_mean`、`stft_energy_mean`。
+
+4. **如果 source5 能量明显更强，优先考虑能量相关修正**
+
+   如果 `source_5` 的 RMS、原始能量或 STFT energy 明显高于 `source_1` / `source_3`，模型可能学到了幅值捷径。后续可考虑：
+
+   - RMS normalize
+   - 幅值随机缩放
+   - 能量标准化
+   - 训练时做 amplitude augmentation
