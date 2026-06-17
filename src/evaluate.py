@@ -198,6 +198,7 @@ def compute_metrics(
         "double_source_predict_as_triple_rate": double_to_triple_rate,
         "double_source_predicted_as_triple_rate": double_to_triple_rate,
         "source5_over_prediction_rate": source5_over_prediction_rate,
+        "source5_false_positive_rate": source5_over_prediction_rate,
     }
     return {
         "threshold": thresholds_for_report(threshold_values, class_names),
@@ -518,6 +519,49 @@ def write_combo_confusion_csv(path: str | Path, combo_confusion: dict[str, dict[
                 )
 
 
+def write_110_to_111_analysis(
+    path: str | Path,
+    probs: np.ndarray,
+    targets: np.ndarray,
+    groups: list[str],
+    condition_paths: list[str],
+    class_names: list[str],
+    threshold: float | list[float] | np.ndarray,
+) -> None:
+    threshold_values = normalize_thresholds(threshold, len(class_names))
+    preds = predictions_at_threshold(probs, class_names, threshold_values)
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "index",
+        "group",
+        "condition_path",
+        "true_label",
+        "pred_label",
+        "source5_margin_over_threshold",
+    ]
+    fieldnames.extend(f"prob_{name}" for name in class_names)
+    fieldnames.extend(f"threshold_{name}" for name in class_names)
+    source5_index = class_names.index("source_5") if "source_5" in class_names else len(class_names) - 1
+    with output_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for index, (prob, target, pred) in enumerate(zip(probs, targets, preds)):
+            if label_to_text(target) != "[1,1,0]" or label_to_text(pred) != "[1,1,1]":
+                continue
+            row = {
+                "index": index,
+                "group": groups[index] if index < len(groups) else "",
+                "condition_path": condition_paths[index] if index < len(condition_paths) else "",
+                "true_label": label_to_text(target),
+                "pred_label": label_to_text(pred),
+                "source5_margin_over_threshold": f"{float(prob[source5_index] - threshold_values[source5_index]):.10g}",
+            }
+            row.update({f"prob_{name}": f"{float(value):.10g}" for name, value in zip(class_names, prob)})
+            row.update({f"threshold_{name}": f"{float(value):.10g}" for name, value in zip(class_names, threshold_values)})
+            writer.writerow(row)
+
+
 def evaluate(
     model_path: str | Path,
     split: str = "test",
@@ -577,6 +621,7 @@ def evaluate(
     output_path = Path(report_path or "outputs/reports/eval_report.json")
     error_analysis_path = output_path.with_name("error_analysis.csv")
     combo_confusion_path = output_path.with_name("combo_confusion.csv")
+    analysis_110_to_111_path = output_path.with_name("analysis_110_to_111.csv")
     write_error_analysis(
         error_analysis_path,
         probs,
@@ -587,6 +632,15 @@ def evaluate(
         threshold_values,
     )
     write_combo_confusion_csv(combo_confusion_path, combo_confusion)
+    write_110_to_111_analysis(
+        analysis_110_to_111_path,
+        probs,
+        targets,
+        groups or [],
+        condition_paths or [],
+        class_names,
+        threshold_values,
+    )
 
     real_breakdowns = None
     if groups is not None:
@@ -619,6 +673,7 @@ def evaluate(
             "eval_report_json": str(output_path),
             "error_analysis_csv": str(error_analysis_path),
             "combo_confusion_csv": str(combo_confusion_path),
+            "analysis_110_to_111_csv": str(analysis_110_to_111_path),
         },
     }
     if real_breakdowns is not None:
@@ -642,6 +697,7 @@ def evaluate(
     print(f"\nreport={output_path}")
     print(f"error_analysis={error_analysis_path}")
     print(f"combo_confusion={combo_confusion_path}")
+    print(f"analysis_110_to_111={analysis_110_to_111_path}")
     return report
 
 

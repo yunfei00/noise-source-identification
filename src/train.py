@@ -18,7 +18,6 @@ from torch.utils.data import ConcatDataset, DataLoader, WeightedRandomSampler
 from torch.utils.data import Dataset
 
 from src.build_real_index import build_real_index, discover_class_names
-from src.create_balanced_split import create_balanced_split
 from src.dataset import RealCsvDataset, SyntheticNpyDataset
 from src.model_cnn import NoiseCNN
 from src.split_real_dataset import split_real_dataset
@@ -195,28 +194,42 @@ class AsymmetricBCEWithLogitsLoss(nn.Module):
     def __init__(
         self,
         pos_weight: torch.Tensor | None = None,
-        fp_penalty: float = 1.5,
-        fn_penalty: float = 1.0,
+        gamma_neg: float = 4.0,
+        gamma_pos: float = 1.0,
+        label_smoothing: float = 0.05,
         class_fp_penalty: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
         self.register_buffer("pos_weight", pos_weight if pos_weight is not None else None)
         self.register_buffer("class_fp_penalty", class_fp_penalty if class_fp_penalty is not None else None)
-        self.fp_penalty = float(fp_penalty)
-        self.fn_penalty = float(fn_penalty)
+        self.gamma_neg = float(gamma_neg)
+        self.gamma_pos = float(gamma_pos)
+        self.label_smoothing = float(label_smoothing)
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        smoothed_targets = targets
+        if self.label_smoothing > 0.0:
+            positive_value = 1.0 - self.label_smoothing
+            negative_value = self.label_smoothing
+            smoothed_targets = torch.where(
+                targets > 0.5,
+                torch.full_like(targets, positive_value),
+                torch.full_like(targets, negative_value),
+            )
         loss = F.binary_cross_entropy_with_logits(
             logits,
-            targets,
+            smoothed_targets,
             pos_weight=self.pos_weight,
             reduction="none",
         )
-        weights = torch.where(
+        probs = torch.sigmoid(logits)
+        pt = torch.where(targets > 0.5, probs, 1.0 - probs)
+        gamma = torch.where(
             targets > 0.5,
-            torch.full_like(targets, self.fn_penalty),
-            torch.full_like(targets, self.fp_penalty),
+            torch.full_like(targets, self.gamma_pos),
+            torch.full_like(targets, self.gamma_neg),
         )
+        weights = torch.pow(torch.clamp(1.0 - pt, min=0.0, max=1.0), gamma)
         if self.class_fp_penalty is not None:
             class_penalty = self.class_fp_penalty.view(1, -1).to(device=targets.device, dtype=targets.dtype)
             weights = torch.where(targets > 0.5, weights, weights * class_penalty)
@@ -248,16 +261,18 @@ def build_criterion(config: dict, train_labels: np.ndarray, class_names: list[st
             for class_name in class_names
         ]
         class_fp_penalty = torch.as_tensor(class_fp_values, dtype=torch.float32, device=device)
-        print(f"loss.fp_penalty={float(loss_config.get('fp_penalty', 1.5))}")
-        print(f"loss.fn_penalty={float(loss_config.get('fn_penalty', 1.0))}")
+        print(f"loss.gamma_neg={float(loss_config.get('gamma_neg', 4.0))}")
+        print(f"loss.gamma_pos={float(loss_config.get('gamma_pos', 1.0))}")
+        print(f"loss.label_smoothing={float(loss_config.get('label_smoothing', 0.05))}")
         print(
             "loss.class_fp_penalty="
             + json.dumps({name: value for name, value in zip(class_names, class_fp_values)}, ensure_ascii=False)
         )
         return AsymmetricBCEWithLogitsLoss(
             pos_weight=pos_weight,
-            fp_penalty=float(loss_config.get("fp_penalty", 1.5)),
-            fn_penalty=float(loss_config.get("fn_penalty", 1.0)),
+            gamma_neg=float(loss_config.get("gamma_neg", 4.0)),
+            gamma_pos=float(loss_config.get("gamma_pos", 1.0)),
+            label_smoothing=float(loss_config.get("label_smoothing", 0.05)),
             class_fp_penalty=class_fp_penalty,
         )
     raise ValueError(f"Unsupported loss.type: {loss_type}")
@@ -309,40 +324,6 @@ def prepare_real_split(config: dict, class_names: list[str]) -> Path | None:
             include_single=True,
             include_combo=True,
         )
-
-    balanced_config = config.get("balanced_train", {})
-    balanced_enabled = bool(balanced_config.get("enabled", False))
-    if balanced_enabled:
-        quota = balanced_config.get("quota", {})
-        if not isinstance(quota, dict) or not quota:
-            raise ValueError("balanced_train.enabled is true, so balanced_train.quota must be a non-empty mapping")
-        base_split_path = Path(balanced_config.get("input_split_file", report_dir / "real_dataset_split.csv"))
-        split_path = Path(balanced_config.get("output_split_file", requested_split_path))
-        if rebuild_real_files or not base_split_path.exists():
-            if rebuild_real_files:
-                print(f"real_only mode splits all indexed real samples; rebuilding {base_split_path}")
-            else:
-                print(f"real dataset base split not found; building {base_split_path}")
-            split_real_dataset(
-                index=index_path,
-                output=base_split_path,
-                train_ratio=float(legacy_split_config.get("train_ratio", 0.7)),
-                val_ratio=float(legacy_split_config.get("val_ratio", 0.15)),
-                test_ratio=float(legacy_split_config.get("test_ratio", 0.15)),
-                seed=int(legacy_split_config.get("seed", config.get("seed", 42))),
-            )
-        if rebuild_real_files or not split_path.exists():
-            if rebuild_real_files:
-                print(f"real_only mode applies balanced train quotas; rebuilding {split_path}")
-            else:
-                print(f"balanced train split not found; building {split_path}")
-            create_balanced_split(
-                input_path=base_split_path,
-                output_path=split_path,
-                quota={str(combo): int(count) for combo, count in quota.items()},
-                seed=int(balanced_config.get("seed", config.get("seed", 42))),
-            )
-        return split_path
 
     split_path = requested_split_path
     if not split_path.exists():
@@ -615,6 +596,7 @@ def compute_validation_metrics(
         "double_to_triple_rate": float(predicted_triple[true_double].mean()) if np.any(true_double) else 0.0,
         "double_source_predict_as_triple_rate": float(predicted_triple[true_double].mean()) if np.any(true_double) else 0.0,
         "source5_over_prediction_rate": source5_over_prediction_rate,
+        "source5_false_positive_rate": source5_over_prediction_rate,
     }
 
 
@@ -660,6 +642,7 @@ def save_training_history(path: str | Path, history: list[dict[str, float | int]
         "exact_match",
         "double_to_triple_rate",
         "source5_over_prediction_rate",
+        "source5_false_positive_rate",
         "lr",
     ]
     with output_path.open("w", encoding="utf-8", newline="") as handle:
@@ -771,6 +754,7 @@ def train(config: dict) -> None:
             "double_to_triple_rate",
             "double_source_predict_as_triple_rate",
             "source5_over_prediction_rate",
+            "source5_false_positive_rate",
         }
         if monitor not in supported_monitors:
             raise ValueError(f"Unsupported early stopping monitor: {monitor}")
@@ -819,6 +803,7 @@ def train(config: dict) -> None:
         exact_match = val_metrics["exact_match"]
         double_to_triple_rate = val_metrics["double_to_triple_rate"]
         source5_over_prediction_rate = val_metrics["source5_over_prediction_rate"]
+        source5_false_positive_rate = val_metrics["source5_false_positive_rate"]
         current_metric = val_loss if monitor == "val_loss" else val_metrics[monitor]
 
         if (
@@ -859,6 +844,7 @@ def train(config: dict) -> None:
                 "exact_match": exact_match,
                 "double_to_triple_rate": double_to_triple_rate,
                 "source5_over_prediction_rate": source5_over_prediction_rate,
+                "source5_false_positive_rate": source5_false_positive_rate,
                 "lr": learning_rate,
             }
         )
@@ -873,6 +859,7 @@ def train(config: dict) -> None:
             f"exact_match={exact_match:.4f} "
             f"double_to_triple_rate={double_to_triple_rate:.4f} "
             f"source5_over_prediction_rate={source5_over_prediction_rate:.4f} "
+            f"source5_false_positive_rate={source5_false_positive_rate:.4f} "
             f"lr={learning_rate:.6g}"
         )
 
