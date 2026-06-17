@@ -77,9 +77,15 @@ data/real_dataset/source_1_source_3_source_5_mix/**/*.csv -> [1,1,1]
 
 ## Recommended workflow
 
+Run the commands in this order.
+
+### Step 1: Check paths
+
 ```bash
 python -m src.check_paths --config configs/train.yaml
 ```
+
+### Step 2: Build the real-data index
 
 ```bash
 python -m src.build_real_index \
@@ -88,34 +94,86 @@ python -m src.build_real_index \
   --output outputs/reports/real_dataset_index.csv
 ```
 
+### Step 3: Split train / val / test
+
 ```bash
 python -m src.split_real_dataset \
   --index outputs/reports/real_dataset_index.csv \
-  --output outputs/reports/real_dataset_split.csv
-```
-
-If `balanced_train.enabled: true` is used, create the quota-selected training split configured in
-`configs/train.yaml`:
-
-```bash
-python -m src.create_balanced_split \
-  --input outputs/reports/real_dataset_split.csv \
-  --output outputs/reports/real_dataset_split_balanced.csv \
-  --quota 100=2100,010=2100,001=2100,110=5000,101=3500,011=3500,111=3000 \
+  --output outputs/reports/real_dataset_split.csv \
+  --train-ratio 0.7 \
+  --val-ratio 0.15 \
+  --test-ratio 0.15 \
   --seed 42
 ```
+
+### Step 4: Train
 
 ```bash
 python -m src.train --config configs/train.yaml
 ```
 
+### Step 5: Evaluate with one global threshold
+
 ```bash
 python -m src.evaluate \
   --model outputs/checkpoints/best.pt \
-  --real-split test
+  --real-split test \
+  --threshold 0.5
 ```
 
-Folder inference:
+### Step 6: Search per-class thresholds after training
+
+```bash
+python -m src.search_thresholds \
+  --model outputs/checkpoints/best.pt \
+  --real-split test \
+  --metric exact_match \
+  --start 0.3 \
+  --end 0.95 \
+  --step 0.05 \
+  --min-source5-threshold 0.6 \
+  --output outputs/reports/threshold_search.csv
+```
+
+### Step 7: Re-evaluate with `best_thresholds.json`
+
+```bash
+python -m src.evaluate \
+  --model outputs/checkpoints/best.pt \
+  --real-split test \
+  --thresholds-json outputs/reports/best_thresholds.json
+```
+
+### Step 8: Diagnose source5 over-prediction
+
+```bash
+python -m src.feature_statistics \
+  --split outputs/reports/real_dataset_split.csv \
+  --split-name train \
+  --output outputs/reports/feature_statistics.csv \
+  --max-samples-per-group 500
+```
+
+`feature_statistics` does not depend on the model checkpoint, so it can be run either before or after training.
+
+## Command dependencies
+
+- `check_paths`: no dependency on generated outputs.
+- `build_real_index`: depends on `data/single` and `data/real_dataset`.
+- `split_real_dataset`: depends on `outputs/reports/real_dataset_index.csv`.
+- `train`: depends on `outputs/reports/real_dataset_split.csv`.
+- `evaluate`: depends on `outputs/checkpoints/best.pt` and `outputs/reports/real_dataset_split.csv`.
+- `search_thresholds`: depends on `outputs/checkpoints/best.pt` and `outputs/reports/real_dataset_split.csv`.
+- `feature_statistics`: depends on `outputs/reports/real_dataset_split.csv`; it does not depend on `outputs/checkpoints/best.pt`.
+
+Important ordering notes:
+
+- `outputs/reports/best_thresholds.json` can only be generated after model training finishes.
+- `src.search_thresholds` depends on `outputs/checkpoints/best.pt`.
+- `src.evaluate` depends on `outputs/checkpoints/best.pt`.
+- `src.train` depends on `outputs/reports/real_dataset_split.csv`.
+
+Folder inference, after training:
 
 ```bash
 python -m src.infer_folder \
@@ -128,24 +186,36 @@ python -m src.infer_folder \
 
 ## Configuration
 
-`configs/train.yaml` defaults to real-only training:
+`configs/train.yaml` is configured for real-only training without quota-selected balanced training:
 
 ```yaml
 training_data:
   mode: real_only
 
+balanced_train:
+  enabled: false
+
 real_data:
   single_dir: data/single
   combo_dir: data/real_dataset
   index_file: outputs/reports/real_dataset_index.csv
-  split_file: outputs/reports/real_dataset_split_balanced.csv
+  split_file: outputs/reports/real_dataset_split.csv
+
+loss:
+  type: asymmetric_bce
+  gamma_neg: 4
+  gamma_pos: 1
+  label_smoothing: 0.05
+
+early_stopping:
+  monitor: exact_match
 ```
 
 In `real_only` mode:
 
 - `data/mixed` is not used.
 - `data.num_samples` is not used.
-- Samples are loaded lazily from CSV files listed in the configured `real_data.split_file`.
+- Samples are loaded lazily from CSV files listed in `real_data.split_file`.
 - An empty split file raises a clear training error.
 
 ## How training samples are fixed
@@ -154,15 +224,14 @@ Training data selection is controlled by the generated CSV split file, not by th
 
 1. `src.train` reads `training_data.mode`. With `real_only`, it sets the synthetic ratio to `0` and the real ratio to `1`.
 2. `src.train` rebuilds `outputs/reports/real_dataset_index.csv` from `real_data.single_dir` and `real_data.combo_dir`.
-3. The base split file `outputs/reports/real_dataset_split.csv` assigns each indexed CSV to `train`, `val`, or `test`.
-4. When `balanced_train.enabled: true`, `src.train` also creates `outputs/reports/real_dataset_split_balanced.csv` from the configured label-combination quotas.
-5. During training, `RealCsvDataset` loads only rows for the requested split. For `train`, if the split file has `selected_for_train`, only true rows are used.
+3. `outputs/reports/real_dataset_split.csv` assigns each indexed CSV to `train`, `val`, or `test`.
+4. During training, `RealCsvDataset` loads rows for the requested split from `outputs/reports/real_dataset_split.csv`.
 
 Therefore the exact training set is:
 
 ```text
-outputs/reports/real_dataset_split_balanced.csv
-where split == train and selected_for_train == true
+outputs/reports/real_dataset_split.csv
+where split == train
 ```
 
 To inspect the exact files that will be trained on:
@@ -172,20 +241,25 @@ python - <<'PY'
 import csv
 from collections import Counter
 
-split_file = "outputs/reports/real_dataset_split_balanced.csv"
+split_file = "outputs/reports/real_dataset_split.csv"
 counts = Counter()
 with open(split_file, newline="", encoding="utf-8") as handle:
     for row in csv.DictReader(handle):
-        selected = row.get("selected_for_train", "").strip().lower() in {"true", "1", "yes", "y"}
-        if row.get("split") == "train" and selected:
+        if row.get("split") == "train":
             counts[row["label"]] += 1
             print(row["file"])
 
-print("selected train label counts:")
+print("train label counts:")
 for label, count in sorted(counts.items()):
     print(label, count)
 PY
 ```
+
+## Historical / not recommended
+
+Quota-selected balanced training is not the recommended workflow for the current configuration. Do not use the old balanced split flow unless you are intentionally reproducing historical experiments.
+
+The deprecated flow included `balanced_train`, `create_balanced_split`, quota strings such as `100=2100,...`, `outputs/reports/real_dataset_split_balanced.csv`, and the `selected_for_train` column.
 
 ## Outputs
 
@@ -193,4 +267,7 @@ PY
 - `outputs/reports/real_dataset_summary.json`: class, sample, group, label, ratio, and invalid-group summary.
 - `outputs/reports/real_dataset_split.csv`: train / val / test split with a `split` column.
 - `outputs/reports/eval_report.json`: source metrics plus group, label-combination, and ratio accuracies.
+- `outputs/reports/threshold_search.csv`: per-class threshold search results.
+- `outputs/reports/best_thresholds.json`: best per-class thresholds generated by `src.search_thresholds` after training.
+- `outputs/reports/feature_statistics.csv`: feature statistics used to diagnose source over-prediction.
 - `outputs/reports/infer_folder_report.csv`: recursive folder inference report.

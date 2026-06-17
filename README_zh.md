@@ -184,13 +184,15 @@ double_to_triple_rate, source5_over_prediction_rate, lr
 
 ## 推荐执行流程
 
-检查路径：
+请按下面顺序执行主流程。
+
+### 第一步：检查路径
 
 ```bash
 python -m src.check_paths --config configs/train.yaml
 ```
 
-构建真实数据索引：
+### 第二步：构建真实数据索引
 
 ```bash
 python -m src.build_real_index \
@@ -199,91 +201,25 @@ python -m src.build_real_index \
   --output outputs/reports/real_dataset_index.csv
 ```
 
-划分训练、验证、测试集：
+### 第三步：划分 train/val/test
 
 ```bash
 python -m src.split_real_dataset \
   --index outputs/reports/real_dataset_index.csv \
-  --output outputs/reports/real_dataset_split.csv
-```
-
-如果 `configs/train.yaml` 中启用了 `balanced_train.enabled: true`，继续生成按配额筛选后的训练 split：
-
-```bash
-python -m src.create_balanced_split \
-  --input outputs/reports/real_dataset_split.csv \
-  --output outputs/reports/real_dataset_split_balanced.csv \
-  --quota 100=2100,010=2100,001=2100,110=5000,101=3500,011=3500,111=3000 \
+  --output outputs/reports/real_dataset_split.csv \
+  --train-ratio 0.7 \
+  --val-ratio 0.15 \
+  --test-ratio 0.15 \
   --seed 42
 ```
 
-分析标签分布：
-
-```bash
-python -m src.analyze_label_distribution \
-  --split outputs/reports/real_dataset_split_balanced.csv \
-  --output outputs/reports/label_distribution.json
-```
-
-训练：
+### 第四步：训练
 
 ```bash
 python -m src.train --config configs/train.yaml
 ```
 
-## 如何确认训练数据就是指定的数据
-
-训练时最终使用的不是 README 文字本身，而是 `configs/train.yaml` 指向的 split CSV 文件。当前配置中：
-
-```yaml
-training_data:
-  mode: real_only
-
-real_data:
-  single_dir: data/single
-  combo_dir: data/real_dataset
-  index_file: outputs/reports/real_dataset_index.csv
-  split_file: outputs/reports/real_dataset_split_balanced.csv
-```
-
-实际流程如下：
-
-1. `training_data.mode: real_only` 表示只使用真实 CSV，不使用 `data/mixed` 合成数据。
-2. 训练前会从 `data/single` 和 `data/real_dataset` 递归扫描 CSV，生成 `outputs/reports/real_dataset_index.csv`。
-3. `outputs/reports/real_dataset_split.csv` 负责把样本分成 `train`、`val`、`test`。
-4. 启用 `balanced_train.enabled: true` 后，会根据 `balanced_train.quota` 生成 `outputs/reports/real_dataset_split_balanced.csv`，并给训练样本写入 `selected_for_train`。
-5. 训练阶段只加载 `split == train` 的行；如果存在 `selected_for_train` 列，还会继续只保留 `selected_for_train == true` 的行。
-
-因此，当前真正进入训练的数据就是：
-
-```text
-outputs/reports/real_dataset_split_balanced.csv
-中 split == train 且 selected_for_train == true 的行
-```
-
-可以用下面命令打印实际训练文件和每种标签组合数量：
-
-```bash
-python - <<'PY'
-import csv
-from collections import Counter
-
-split_file = "outputs/reports/real_dataset_split_balanced.csv"
-counts = Counter()
-with open(split_file, newline="", encoding="utf-8") as handle:
-    for row in csv.DictReader(handle):
-        selected = row.get("selected_for_train", "").strip().lower() in {"true", "1", "yes", "y"}
-        if row.get("split") == "train" and selected:
-            counts[row["label"]] += 1
-            print(row["file"])
-
-print("selected train label counts:")
-for label, count in sorted(counts.items()):
-    print(label, count)
-PY
-```
-
-统一阈值评估：
+### 第五步：评估统一阈值
 
 ```bash
 python -m src.evaluate \
@@ -292,9 +228,7 @@ python -m src.evaluate \
   --threshold 0.5
 ```
 
-## 如何执行阈值搜索
-
-对 `source_1`、`source_3`、`source_5` 分别搜索独立阈值：
+### 第六步：训练后再做 per-class threshold search
 
 ```bash
 python -m src.search_thresholds \
@@ -302,8 +236,121 @@ python -m src.search_thresholds \
   --real-split test \
   --metric exact_match \
   --start 0.3 \
-  --end 0.9 \
+  --end 0.95 \
   --step 0.05 \
+  --min-source5-threshold 0.6 \
+  --output outputs/reports/threshold_search.csv
+```
+
+### 第七步：使用 best_thresholds.json 重新评估
+
+```bash
+python -m src.evaluate \
+  --model outputs/checkpoints/best.pt \
+  --real-split test \
+  --thresholds-json outputs/reports/best_thresholds.json
+```
+
+### 第八步：诊断 source5 过预测
+
+```bash
+python -m src.feature_statistics \
+  --split outputs/reports/real_dataset_split.csv \
+  --split-name train \
+  --output outputs/reports/feature_statistics.csv \
+  --max-samples-per-group 500
+```
+
+`feature_statistics` 不依赖模型，可以在训练前或训练后执行。
+
+## 命令依赖关系
+
+- `check_paths`：不依赖其他输出。
+- `build_real_index`：依赖 `data/single` 和 `data/real_dataset`。
+- `split_real_dataset`：依赖 `outputs/reports/real_dataset_index.csv`。
+- `train`：依赖 `outputs/reports/real_dataset_split.csv`。
+- `evaluate`：依赖 `outputs/checkpoints/best.pt` 和 `outputs/reports/real_dataset_split.csv`。
+- `search_thresholds`：依赖 `outputs/checkpoints/best.pt` 和 `outputs/reports/real_dataset_split.csv`。
+- `feature_statistics`：依赖 `outputs/reports/real_dataset_split.csv`，不依赖 `outputs/checkpoints/best.pt`。
+
+顺序必须注意：
+
+- `outputs/reports/best_thresholds.json` 必须在模型训练完成后才能生成。
+- `threshold_search` 依赖 `outputs/checkpoints/best.pt`。
+- `evaluate` 依赖 `outputs/checkpoints/best.pt`。
+- `train` 依赖 `outputs/reports/real_dataset_split.csv`。
+
+## 如何确认训练数据就是指定的数据
+
+训练时最终使用的不是 README 文字本身，而是 `configs/train.yaml` 指向的 split CSV 文件。当前配置中真正训练数据是：
+
+```text
+outputs/reports/real_dataset_split.csv 中 split == train 的所有行
+```
+
+当前流程如下：
+
+1. `training_data.mode: real_only` 表示只使用真实 CSV，不使用 `data/mixed` 合成数据。
+2. 训练前会从 `data/single` 和 `data/real_dataset` 递归扫描 CSV，生成 `outputs/reports/real_dataset_index.csv`。
+3. `outputs/reports/real_dataset_split.csv` 负责把样本分成 `train`、`val`、`test`。
+4. 训练阶段只加载 `outputs/reports/real_dataset_split.csv` 中 `split == train` 的行。
+
+可以用下面命令打印实际训练文件和每种标签组合数量：
+
+```bash
+python - <<'PY'
+import csv
+from collections import Counter
+
+split_file = "outputs/reports/real_dataset_split.csv"
+counts = Counter()
+with open(split_file, newline="", encoding="utf-8") as handle:
+    for row in csv.DictReader(handle):
+        if row.get("split") == "train":
+            counts[row["label"]] += 1
+            print(row["file"])
+
+print("train label counts:")
+for label, count in sorted(counts.items()):
+    print(label, count)
+PY
+```
+
+## 当前推荐配置
+
+```yaml
+training_data:
+  mode: real_only
+
+balanced_train:
+  enabled: false
+
+real_data:
+  split_file: outputs/reports/real_dataset_split.csv
+
+loss:
+  type: asymmetric_bce
+  gamma_neg: 4
+  gamma_pos: 1
+  label_smoothing: 0.05
+
+early_stopping:
+  monitor: exact_match
+```
+
+## 如何执行阈值搜索
+
+阈值搜索必须在训练完成后执行，因为它依赖 `outputs/checkpoints/best.pt`。对 `source_1`、`source_3`、`source_5` 分别搜索独立阈值：
+
+```bash
+python -m src.search_thresholds \
+  --model outputs/checkpoints/best.pt \
+  --real-split test \
+  --metric exact_match \
+  --start 0.3 \
+  --end 0.95 \
+  --step 0.05 \
+  --min-source5-threshold 0.6 \
   --output outputs/reports/threshold_search.csv
 ```
 
@@ -313,15 +360,6 @@ python -m src.search_thresholds \
 - `outputs/reports/best_thresholds.json`
 
 使用最佳阈值重新评估：
-
-```bash
-python -m src.evaluate \
-  --model outputs/checkpoints/best.pt \
-  --real-split test \
-  --thresholds source_1=0.55,source_3=0.45,source_5=0.75
-```
-
-也可以从 JSON 读取：
 
 ```bash
 python -m src.evaluate \
@@ -360,28 +398,18 @@ outputs/reports/combo_confusion.csv
 - `outputs/reports/combo_confusion.csv`：组合混淆矩阵。
 - `outputs/reports/threshold_search.csv`：阈值搜索结果。
 - `outputs/reports/best_thresholds.json`：最佳 per-class 阈值。
+- `outputs/reports/feature_statistics.csv`：特征统计明细。
+- `outputs/reports/feature_statistics_summary.json`：特征统计聚合摘要。
 
-## 推荐训练配比
+## 历史方案/不推荐
 
-当前推荐训练配额：
+当前配置不再推荐按配额筛选训练集。除非你在复现实验历史结果，否则不要把旧的平衡划分流程作为主流程。
 
-- `100`：2100
-- `010`：2100
-- `001`：2100
-- `110`：5000
-- `101`：3500
-- `011`：3500
-- `111`：3000
-
-说明：
-
-- 训练集可以不使用全部数据。
-- 验证集和测试集保持真实分布。
-- 当某个 source 过预测严重时，应降低包含该 source 的组合占比，提高不包含该 source 的组合权重。
+旧方案包括：`balanced_train`、`create_balanced_split`、`quota 100=2100...`、`real_dataset_split_balanced.csv` 和 `selected_for_train`。
 
 ## source5 过预测诊断流程
 
-当评估结果显示 `source_5` 总是被预测为存在，或 `source5_false_positive_rate` / `source5_over_prediction_rate` 明显偏高时，不要直接继续训练，建议按以下顺序定位根因：
+当评估结果显示 `source_5` 总是被预测为存在，或 `source5_false_positive_rate` / `source5_over_prediction_rate` 明显偏高时，建议按以下顺序定位根因：
 
 1. **检查 110 -> 111 错误样本的 source5 概率边界**
 
@@ -419,7 +447,7 @@ outputs/reports/combo_confusion.csv
 
 3. **统计原始信号与频谱能量特征**
 
-   对训练集按 group 统计原始信号、FFT 和 STFT 特征：
+   对训练集按 group 统计原始信号、FFT 和 STFT 特征。该命令不依赖模型，可以在训练前或训练后执行：
 
    ```bash
    python -m src.feature_statistics \
