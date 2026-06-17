@@ -418,7 +418,7 @@ def print_real_breakdowns(breakdowns: dict) -> None:
             print(f"  true {true_label}: {pred_counts}")
 
 
-def _real_loader_and_groups(config: dict, class_names: list[str], real_split: str) -> tuple[DataLoader, list[str], list[str]]:
+def _real_loader_and_groups(config: dict, class_names: list[str], real_split: str) -> tuple[DataLoader, list[str], list[str], list[str]]:
     split_path = prepare_real_split(config, class_names)
     if split_path is None:
         split_path = Path(
@@ -443,7 +443,8 @@ def _real_loader_and_groups(config: dict, class_names: list[str], real_split: st
     )
     groups = [str(sample["group"]) for sample in dataset.samples]
     condition_paths = [str(sample.get("condition_path", "")) for sample in dataset.samples]
-    return loader, groups, condition_paths
+    files = [str(sample.get("file", "")) for sample in dataset.samples]
+    return loader, groups, condition_paths, files
 
 
 def write_error_analysis(
@@ -527,39 +528,66 @@ def write_110_to_111_analysis(
     condition_paths: list[str],
     class_names: list[str],
     threshold: float | list[float] | np.ndarray,
-) -> None:
+    files: list[str] | None = None,
+) -> dict[str, float | int]:
     threshold_values = normalize_thresholds(threshold, len(class_names))
     preds = predictions_at_threshold(probs, class_names, threshold_values)
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [
-        "index",
+        "file",
         "group",
         "condition_path",
         "true_label",
         "pred_label",
-        "source5_margin_over_threshold",
+        "source_1_prob",
+        "source_3_prob",
+        "source_5_prob",
+        "source_1_threshold",
+        "source_3_threshold",
+        "source_5_threshold",
+        "source_5_margin",
     ]
-    fieldnames.extend(f"prob_{name}" for name in class_names)
-    fieldnames.extend(f"threshold_{name}" for name in class_names)
-    source5_index = class_names.index("source_5") if "source_5" in class_names else len(class_names) - 1
+    class_index = {name: index for index, name in enumerate(class_names)}
+    source5_values: list[float] = []
+    source5_margins: list[float] = []
     with output_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         for index, (prob, target, pred) in enumerate(zip(probs, targets, preds)):
             if label_to_text(target) != "[1,1,0]" or label_to_text(pred) != "[1,1,1]":
                 continue
-            row = {
-                "index": index,
-                "group": groups[index] if index < len(groups) else "",
-                "condition_path": condition_paths[index] if index < len(condition_paths) else "",
-                "true_label": label_to_text(target),
-                "pred_label": label_to_text(pred),
-                "source5_margin_over_threshold": f"{float(prob[source5_index] - threshold_values[source5_index]):.10g}",
-            }
-            row.update({f"prob_{name}": f"{float(value):.10g}" for name, value in zip(class_names, prob)})
-            row.update({f"threshold_{name}": f"{float(value):.10g}" for name, value in zip(class_names, threshold_values)})
-            writer.writerow(row)
+            source5_prob = float(prob[class_index["source_5"]])
+            source5_margin = source5_prob - float(threshold_values[class_index["source_5"]])
+            source5_values.append(source5_prob)
+            source5_margins.append(source5_margin)
+            writer.writerow(
+                {
+                    "file": files[index] if files is not None and index < len(files) else "",
+                    "group": groups[index] if index < len(groups) else "",
+                    "condition_path": condition_paths[index] if index < len(condition_paths) else "",
+                    "true_label": label_to_text(target),
+                    "pred_label": label_to_text(pred),
+                    "source_1_prob": f"{float(prob[class_index['source_1']]):.10g}",
+                    "source_3_prob": f"{float(prob[class_index['source_3']]):.10g}",
+                    "source_5_prob": f"{source5_prob:.10g}",
+                    "source_1_threshold": f"{float(threshold_values[class_index['source_1']]):.10g}",
+                    "source_3_threshold": f"{float(threshold_values[class_index['source_3']]):.10g}",
+                    "source_5_threshold": f"{float(threshold_values[class_index['source_5']]):.10g}",
+                    "source_5_margin": f"{source5_margin:.10g}",
+                }
+            )
+    values = np.asarray(source5_values, dtype=np.float32)
+    margins = np.asarray(source5_margins, dtype=np.float32)
+    return {
+        "count": int(values.size),
+        "source5_prob_mean": float(values.mean()) if values.size else 0.0,
+        "source5_prob_median": float(np.median(values)) if values.size else 0.0,
+        "source5_prob_p90": float(np.percentile(values, 90)) if values.size else 0.0,
+        "source5_prob_min": float(values.min()) if values.size else 0.0,
+        "source5_prob_max": float(values.max()) if values.size else 0.0,
+        "source5_margin_mean": float(margins.mean()) if margins.size else 0.0,
+    }
 
 
 def evaluate(
@@ -588,8 +616,9 @@ def evaluate(
     eval_split = split
     groups: list[str] | None = None
     condition_paths: list[str] | None = None
+    files: list[str] | None = None
     if requested_real_split is not None:
-        loader, groups, condition_paths = _real_loader_and_groups(config, class_names, requested_real_split)
+        loader, groups, condition_paths, files = _real_loader_and_groups(config, class_names, requested_real_split)
         eval_split = f"real_{requested_real_split}"
     else:
         loader = make_loader(config, split, shuffle=False, class_names=class_names)
@@ -632,7 +661,7 @@ def evaluate(
         threshold_values,
     )
     write_combo_confusion_csv(combo_confusion_path, combo_confusion)
-    write_110_to_111_analysis(
+    analysis_110_to_111 = write_110_to_111_analysis(
         analysis_110_to_111_path,
         probs,
         targets,
@@ -640,6 +669,7 @@ def evaluate(
         condition_paths or [],
         class_names,
         threshold_values,
+        files,
     )
 
     real_breakdowns = None
@@ -668,6 +698,7 @@ def evaluate(
         "overall": selected_metrics["overall"],
         "combo_confusion": combo_confusion,
         "source_1_source_3_mix_errors": source_1_source_3_mix_errors,
+        "analysis_110_to_111": analysis_110_to_111,
         "thresholds": metrics_by_threshold,
         "artifacts": {
             "eval_report_json": str(output_path),

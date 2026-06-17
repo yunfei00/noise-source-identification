@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from src.evaluate import collect_probabilities, compute_metrics, thresholds_for_report, _real_loader_and_groups
+from src.evaluate import collect_probabilities, compute_metrics, compute_group_accuracy, predictions_at_threshold, thresholds_for_report, _real_loader_and_groups
 from src.infer import load_checkpoint
 from src.model_cnn import NoiseCNN
 from src.train import make_loader, resolve_device
@@ -36,7 +36,7 @@ def _load_probs_and_targets(
     split: str,
     real_split: str | None,
     device_name: str,
-) -> tuple[np.ndarray, np.ndarray, list[str], str]:
+) -> tuple[np.ndarray, np.ndarray, list[str], str, list[str] | None]:
     device = resolve_device(device_name)
     checkpoint = load_checkpoint(model_path, map_location=device)
     class_names = checkpoint.get("class_names")
@@ -47,7 +47,7 @@ def _load_probs_and_targets(
         raise ValueError("Checkpoint is missing config")
 
     if real_split is not None:
-        loader, _, _ = _real_loader_and_groups(config, class_names, real_split)
+        loader, groups, _, _ = _real_loader_and_groups(config, class_names, real_split)
         eval_split = f"real_{real_split}"
     else:
         loader = make_loader(config, split, shuffle=False, class_names=class_names)
@@ -56,7 +56,7 @@ def _load_probs_and_targets(
     model = NoiseCNN(num_classes=len(class_names)).to(device)
     model.load_state_dict(checkpoint["model_state"])
     probs, targets = collect_probabilities(model, loader, device)
-    return probs, targets, class_names, eval_split
+    return probs, targets, class_names, eval_split, locals().get("groups")
 
 
 def search_thresholds(
@@ -74,7 +74,7 @@ def search_thresholds(
     if metric not in METRIC_KEYS:
         raise ValueError(f"metric must be one of {', '.join(METRIC_KEYS)}")
 
-    probs, targets, class_names, eval_split = _load_probs_and_targets(model_path, split, real_split, device_name)
+    probs, targets, class_names, eval_split, groups = _load_probs_and_targets(model_path, split, real_split, device_name)
     rows: list[dict[str, str]] = []
     grid = threshold_values(start, end, step)
     for threshold_combo in itertools.product(grid, repeat=len(class_names)):
@@ -83,6 +83,11 @@ def search_thresholds(
                 continue
         metrics = compute_metrics(probs, targets, class_names, np.asarray(threshold_combo, dtype=np.float32))
         overall = metrics["overall"]
+        preds = predictions_at_threshold(probs, class_names, np.asarray(threshold_combo, dtype=np.float32))
+        group_accuracy = compute_group_accuracy(preds, targets, groups or []) if groups is not None else {}
+        source_1_source_3_mix_accuracy = float(
+            group_accuracy.get("source_1_source_3_mix", {}).get("exact_match_accuracy", 0.0)
+        )
         row = {
             "thresholds": json.dumps(thresholds_for_report(threshold_combo, class_names), sort_keys=True),
             "metric": metric,
@@ -93,8 +98,11 @@ def search_thresholds(
             "exact_match": f"{overall['exact_match']:.10g}",
             "over_prediction_rate": f"{overall['over_prediction_rate']:.10g}",
             "under_prediction_rate": f"{overall['under_prediction_rate']:.10g}",
+            "source5_false_positive_rate": f"{overall['source5_false_positive_rate']:.10g}",
             "source5_over_prediction_rate": f"{overall['source5_over_prediction_rate']:.10g}",
+            "double_to_triple_rate": f"{overall['double_source_predict_as_triple_rate']:.10g}",
             "double_source_predict_as_triple_rate": f"{overall['double_source_predict_as_triple_rate']:.10g}",
+            "source_1_source_3_mix_accuracy": f"{source_1_source_3_mix_accuracy:.10g}",
         }
         row.update({class_name: f"{value:.10g}" for class_name, value in zip(class_names, threshold_combo)})
         for class_name in class_names:
@@ -118,8 +126,11 @@ def search_thresholds(
         "exact_match",
         "over_prediction_rate",
         "under_prediction_rate",
+        "source5_false_positive_rate",
         "source5_over_prediction_rate",
+        "double_to_triple_rate",
         "double_source_predict_as_triple_rate",
+        "source_1_source_3_mix_accuracy",
     ]
     for class_name in class_names:
         fieldnames.extend(
@@ -146,8 +157,11 @@ def search_thresholds(
             "exact_match": float(best["exact_match"]),
             "micro_f1": float(best["micro_f1"]),
             "macro_f1": float(best["macro_f1"]),
+            "source5_false_positive_rate": float(best["source5_false_positive_rate"]),
             "source5_over_prediction_rate": float(best["source5_over_prediction_rate"]),
+            "double_to_triple_rate": float(best["double_to_triple_rate"]),
             "double_source_predict_as_triple_rate": float(best["double_source_predict_as_triple_rate"]),
+            "source_1_source_3_mix_accuracy": float(best["source_1_source_3_mix_accuracy"]),
         }
         with best_thresholds_path.open("w", encoding="utf-8") as handle:
             json.dump(best_payload, handle, ensure_ascii=False, indent=2)
