@@ -338,6 +338,36 @@ early_stopping:
   monitor: exact_match
 ```
 
+## CSV 批量转图片查看数据
+
+可以把输入目录下所有 CSV 时域数据递归转换成 PNG，输出目录结构和输入目录结构保持一致，只把 `.csv` 后缀改成 `.png`。
+
+示例：
+
+```text
+data/single/source_1/600.000MHz/000001.csv
+outputs/csv_images/source_1/600.000MHz/000001.png
+```
+
+执行完整转换：
+
+```bash
+python -m src.csv_to_images \
+  --input data/single \
+  --output outputs/csv_images
+```
+
+先测试 20 个文件：
+
+```bash
+python -m src.csv_to_images \
+  --input data/single \
+  --output outputs/csv_images \
+  --max-files 20
+```
+
+脚本会自动查找 `DATA` 行，只读取其后的两列数值：第一列作为时间横轴，第二列作为幅值纵轴。支持逗号、空格和 tab 分隔；单个 CSV 失败时只打印 warning，不中断整体转换。
+
 ## 如何执行阈值搜索
 
 阈值搜索必须在训练完成后执行，因为它依赖 `outputs/checkpoints/best.pt`。对 `source_1`、`source_3`、`source_5` 分别搜索独立阈值：
@@ -398,6 +428,7 @@ outputs/reports/combo_confusion.csv
 - `outputs/reports/combo_confusion.csv`：组合混淆矩阵。
 - `outputs/reports/threshold_search.csv`：阈值搜索结果。
 - `outputs/reports/best_thresholds.json`：最佳 per-class 阈值。
+- `outputs/csv_images`：CSV 时域数据批量转图片输出目录。
 - `outputs/reports/feature_statistics.csv`：特征统计明细。
 - `outputs/reports/feature_statistics_summary.json`：特征统计聚合摘要。
 

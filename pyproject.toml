@@ -5,6 +5,7 @@ description = "Multi-label noise source identification based on STFT and CNN"
 requires-python = ">=3.10"
 
 dependencies = [
+    "matplotlib",
     "numpy",
     "pandas",
     "scipy",
