@@ -10,6 +10,7 @@ import numpy as np
 from src.build_real_index import build_real_index
 from src.dataset import parse_group_label
 from src.evaluate import compute_metrics
+from src.features import apply_signal_normalization, compute_stft_feature
 from src.search_thresholds import threshold_values
 from src.split_real_dataset import split_rows
 
@@ -82,6 +83,35 @@ class ThreeSourceRealDatasetTest(unittest.TestCase):
 
     def test_threshold_values_are_inclusive(self) -> None:
         self.assertEqual(threshold_values(0.3, 0.4, 0.05), [0.3, 0.35, 0.4])
+
+    def test_absolute_stft_feature_is_not_log_compressed(self) -> None:
+        signal = np.asarray([0.0, 2.0, 0.0, -2.0, 0.0, 2.0, 0.0, -2.0], dtype=np.float32)
+
+        absolute = compute_stft_feature(
+            signal,
+            sample_rate=8,
+            nperseg=4,
+            noverlap=0,
+            target_freq_bins=4,
+            target_time_bins=2,
+            magnitude_scale="absolute",
+        )
+        log_feature = compute_stft_feature(
+            signal,
+            sample_rate=8,
+            nperseg=4,
+            noverlap=0,
+            target_freq_bins=4,
+            target_time_bins=2,
+            magnitude_scale="log1p",
+        )
+
+        self.assertGreater(float(absolute.max()), float(log_feature.max()))
+
+    def test_none_signal_normalization_preserves_values(self) -> None:
+        signal = np.asarray([1.0, -2.0, 3.0], dtype=np.float32)
+        normalized = apply_signal_normalization(signal, "none")
+        np.testing.assert_allclose(normalized, signal)
 
 
 if __name__ == "__main__":

@@ -9,6 +9,11 @@ from scipy.signal import stft
 
 
 _TOKEN_SPLIT_RE = re.compile(r"[,\s]+")
+_ABSOLUTE_MAGNITUDE_ALIASES = {"absolute", "linear", "magnitude", "abs"}
+_LOG_MAGNITUDE_ALIASES = {"log1p", "log"}
+_DB_MAGNITUDE_ALIASES = {"db", "dB", "decibel", "decibels"}
+_NO_NORMALIZATION_ALIASES = {"none", "raw", "identity", "absolute"}
+_STANDARDIZE_ALIASES = {"standardize", "zscore", "z-score", "normalize"}
 
 
 @dataclass(frozen=True)
@@ -179,6 +184,36 @@ def normalize_signal(signal: np.ndarray) -> np.ndarray:
     return (centered / std).astype(np.float32, copy=False)
 
 
+def apply_signal_normalization(signal: np.ndarray, mode: str = "standardize") -> np.ndarray:
+    """Apply configured time-domain normalization before feature extraction."""
+    normalized_mode = str(mode).strip().lower()
+    signal = np.asarray(signal, dtype=np.float32).reshape(-1)
+    if normalized_mode in _NO_NORMALIZATION_ALIASES:
+        return np.nan_to_num(signal, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32, copy=False)
+    if normalized_mode in _STANDARDIZE_ALIASES:
+        return normalize_signal(signal)
+    raise ValueError(
+        "Unsupported signal_normalization mode: "
+        f"{mode}. Use 'none' for raw absolute values or 'standardize' for z-score normalization."
+    )
+
+
+def scale_stft_magnitude(magnitude: np.ndarray, magnitude_scale: str = "log1p") -> np.ndarray:
+    """Scale an STFT magnitude matrix according to the configured feature scale."""
+    normalized_scale = str(magnitude_scale).strip().lower()
+    magnitude = np.asarray(magnitude, dtype=np.float32)
+    if normalized_scale in _ABSOLUTE_MAGNITUDE_ALIASES:
+        return magnitude.astype(np.float32, copy=False)
+    if normalized_scale in _LOG_MAGNITUDE_ALIASES:
+        return np.log1p(magnitude).astype(np.float32, copy=False)
+    if normalized_scale in _DB_MAGNITUDE_ALIASES:
+        raise ValueError("dB STFT scaling is disabled for training; set stft.magnitude_scale=absolute.")
+    raise ValueError(
+        "Unsupported stft magnitude_scale: "
+        f"{magnitude_scale}. Use 'absolute' for raw magnitude or 'log1p' for legacy log magnitude."
+    )
+
+
 def _pad_or_crop_2d(feature: np.ndarray, target_freq_bins: int, target_time_bins: int) -> np.ndarray:
     if target_freq_bins <= 0 or target_time_bins <= 0:
         raise ValueError(
@@ -200,8 +235,9 @@ def compute_stft_feature(
     noverlap: int,
     target_freq_bins: int,
     target_time_bins: int,
+    magnitude_scale: str = "log1p",
 ) -> np.ndarray:
-    """Compute a fixed-shape log-magnitude STFT feature."""
+    """Compute a fixed-shape STFT feature."""
     signal = np.asarray(signal, dtype=np.float32).reshape(-1)
     if signal.size == 0:
         raise ValueError("Cannot compute STFT for an empty signal")
@@ -221,6 +257,6 @@ def compute_stft_feature(
         boundary=None,
         padded=False,
     )
-    magnitude = np.abs(zxx)
-    feature = np.log1p(magnitude).astype(np.float32, copy=False)
+    magnitude = np.abs(zxx).astype(np.float32, copy=False)
+    feature = scale_stft_magnitude(magnitude, magnitude_scale)
     return _pad_or_crop_2d(feature, target_freq_bins, target_time_bins)

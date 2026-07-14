@@ -1,13 +1,13 @@
 # Noise Source Identification 中文说明
 
-本项目用于基于 CSV 信号识别噪声源。当前真实数据工作流统一使用两个目录：
+本项目用于基于 CSV 时域信号识别噪声源。当前真实数据工作流只使用两个目录：
 
 - `data/single`：单源真实数据。
 - `data/real_dataset`：真实组合数据。
 
-请不要再创建或配置旧的真实训练/测试目录。
+不要再使用旧的真实训练/测试目录。
 
-## 真实数据目录标准
+## 数据目录
 
 ```text
 data/
@@ -16,17 +16,11 @@ data/
       600.000MHz/
         000001.csv
     source_3/
-      600.000MHz/
-        000001.csv
     source_5/
-      600.000MHz/
-        000001.csv
 
   real_dataset/
     source_1_source_3_mix/
       ratio_1_1/
-        600.000MHz/
-          000001.csv
       ratio_1_2/
       ratio_1_4/
     source_1_source_5_mix/
@@ -38,11 +32,11 @@ data/
       ratio_4_2_1/
 ```
 
-`data/single` 的下一级目录是类别名。`data/real_dataset` 的下一级目录是组合标签名。更深层目录可以是频率、比例、批次或工况，所有 CSV 会递归读取。
+`data/single` 的一级目录是类别名。`data/real_dataset` 的一级目录是组合标签名。更深层目录可以表示频率、比例、批次或工况，CSV 会递归读取。
 
 ## 标签规则
 
-`class_names` 默认来自 `data/single` 的下一级目录并按名称排序，例如：
+默认类别顺序：
 
 ```text
 ["source_1", "source_3", "source_5"]
@@ -60,139 +54,45 @@ data/real_dataset/source_3_source_5_mix/**/*.csv -> [0,1,1]
 data/real_dataset/source_1_source_3_source_5_mix/**/*.csv -> [1,1,1]
 ```
 
-## 模型偏置问题说明
+## 当前推荐配置
 
-多标签模型如果长期倾向预测某个 source 存在，就会出现类别预测偏置。当前重点观察到的问题是 `source_5` 过度预测：很多真实不包含 `source_5` 的样本也被预测成包含 `source_5`。
-
-这类问题通常不能只看整体 F1，需要同时看：
-
-- 每个 source 的 precision、recall、false positive rate、false negative rate。
-- 每个组合标签的 exact match accuracy。
-- 组合混淆矩阵 `combo_confusion`。
-- 双源被预测成三源的比例。
-
-## source_5 过预测问题
-
-`source_5 recall` 很高只说明真实包含 `source_5` 的样本大多被找到了，不代表模型没有误报。如果模型几乎总是把 `source_5` 置为 1，recall 会很高，但 precision 和 false positive rate 会变差。
-
-新增评估指标：
-
-```text
-source5_over_prediction_rate
-```
-
-它表示：真实 `source_5 = 0` 的样本中，被预测为 `source_5 = 1` 的比例。这个值越高，说明 source_5 误报越严重。
-
-## 为什么 recall 高不代表模型好
-
-recall 只关心真实为 1 的样本有没有被预测出来。对于 `source_5`：
-
-```text
-recall = TP / (TP + FN)
-```
-
-如果模型把大量样本都预测成包含 `source_5`，FN 会很少，recall 可能接近 1。但这会制造大量 FP，也就是把不含 `source_5` 的样本误判为含 `source_5`。
-
-因此需要同时看：
-
-```text
-precision = TP / (TP + FP)
-false_positive_rate = FP / (FP + TN)
-```
-
-## false positive 和 false negative 区别
-
-对某个 source 来说：
-
-- false positive：真实不存在，但模型预测存在。比如真实 `[1,1,0]` 被预测成 `[1,1,1]`，就是 `source_5` false positive。
-- false negative：真实存在，但模型预测不存在。比如真实 `[1,1,0]` 被预测成 `[0,1,0]`，就是 `source_1` false negative。
-
-当前 source_5 的核心问题是 false positive 偏高。
-
-## WeightedRandomSampler 的作用
-
-训练配置支持：
+当前默认只使用真实 CSV，不使用合成数据，也不启用 quota-balanced split。
 
 ```yaml
-sampler:
-  enabled: true
-  strategy: label_combo
-```
+training_data:
+  mode: real_only
 
-`label_combo` 会按标签组合均衡采样，让 `[1,0,0]`、`[0,1,0]`、`[0,0,1]`、`[1,1,0]`、`[1,0,1]`、`[0,1,1]`、`[1,1,1]` 在训练中被看到的频率更接近。样本少的组合权重大，样本多的组合权重小。
+preprocessing:
+  signal_normalization: none
 
-`source_balance` 会按每个 source 的正负样本稀缺程度计算样本权重。
+balanced_train:
+  enabled: false
 
-`none` 表示普通 shuffle。
+real_data:
+  split_file: outputs/reports/real_dataset_split.csv
 
-训练启动时会打印每种 label combo 的原始数量和采样权重。
+stft:
+  magnitude_scale: absolute
 
-## asymmetric_bce 的作用
-
-默认损失函数改为：
-
-```yaml
-loss:
-  type: asymmetric_bce
-  use_pos_weight: false
-  fp_penalty: 2.0
-  fn_penalty: 1.0
-  class_fp_penalty:
-    source_1: 1.5
-    source_3: 1.5
-    source_5: 3.0
-```
-
-`asymmetric_bce` 会先计算 `BCEWithLogitsLoss(reduction="none")`，再按真实标签加权：
-
-- `target == 0` 的位置乘以 `fp_penalty`。
-- `target == 1` 的位置乘以 `fn_penalty`。
-- 如果设置了 `class_fp_penalty`，对应类别的 `target == 0` 损失会再乘以该类别的惩罚。
-
-这里默认不使用 `pos_weight`，因为当前问题是过预测 1。盲目增加正样本权重可能进一步鼓励模型预测 source 存在。
-
-## 为什么 source_5 需要更高 fp_penalty
-
-如果 `source_5` 经常被误报，就需要让模型在 `source_5` 的负样本上犯错时付出更高代价：
-
-```yaml
-class_fp_penalty:
-  source_5: 3.0
-```
-
-这会重点惩罚真实不含 `source_5` 但预测含 `source_5` 的情况，帮助降低 `source5_over_prediction_rate`。
-
-## 为什么 EarlyStopping 改为 exact_match
-
-当前任务最终关心的是组合是否完全识别正确，而不是某个 source 单独是否命中。因此 early stopping 默认监控：
-
-```yaml
 early_stopping:
-  enabled: true
   monitor: exact_match
-  mode: max
-  patience: 15
-  min_delta: 0.001
 ```
 
-`best.pt` 会按验证集 `exact_match` 保存。训练历史 `training_history.csv` 会记录：
+关键点：
 
-```text
-epoch, train_loss, val_loss, micro_f1, macro_f1, exact_match,
-double_to_triple_rate, source5_over_prediction_rate, lr
-```
+- `preprocessing.signal_normalization: none`：保留原始时域幅值，不做单样本 z-score。
+- `stft.magnitude_scale: absolute`：使用 STFT 线性绝对幅值，不使用 dB，也不使用 `log1p` 对数压缩。
+- `best.pt` 按验证集 `exact_match` 保存。
 
 ## 推荐执行流程
 
-请按下面顺序执行主流程。
-
-### 第一步：检查路径
+检查路径：
 
 ```bash
 python -m src.check_paths --config configs/train.yaml
 ```
 
-### 第二步：构建真实数据索引
+构建真实数据索引：
 
 ```bash
 python -m src.build_real_index \
@@ -201,7 +101,7 @@ python -m src.build_real_index \
   --output outputs/reports/real_dataset_index.csv
 ```
 
-### 第三步：划分 train/val/test
+划分训练、验证、测试集：
 
 ```bash
 python -m src.split_real_dataset \
@@ -213,13 +113,21 @@ python -m src.split_real_dataset \
   --seed 42
 ```
 
-### 第四步：训练
+分析标签分布：
+
+```bash
+python -m src.analyze_label_distribution \
+  --split outputs/reports/real_dataset_split.csv \
+  --output outputs/reports/label_distribution.json
+```
+
+训练：
 
 ```bash
 python -m src.train --config configs/train.yaml
 ```
 
-### 第五步：评估统一阈值
+统一阈值评估：
 
 ```bash
 python -m src.evaluate \
@@ -228,7 +136,7 @@ python -m src.evaluate \
   --threshold 0.5
 ```
 
-### 第六步：训练后再做 per-class threshold search
+per-class 阈值搜索：
 
 ```bash
 python -m src.search_thresholds \
@@ -242,7 +150,7 @@ python -m src.search_thresholds \
   --output outputs/reports/threshold_search.csv
 ```
 
-### 第七步：使用 best_thresholds.json 重新评估
+使用最佳阈值重新评估：
 
 ```bash
 python -m src.evaluate \
@@ -251,51 +159,28 @@ python -m src.evaluate \
   --thresholds-json outputs/reports/best_thresholds.json
 ```
 
-### 第八步：诊断 source5 过预测
+## CSV 批量转图片查看数据
+
+把输入目录下所有 CSV 时域数据递归转换成 PNG，输出目录结构和输入目录结构一致，只把 `.csv` 改成 `.png`。
 
 ```bash
-python -m src.feature_statistics \
-  --split outputs/reports/real_dataset_split.csv \
-  --split-name train \
-  --output outputs/reports/feature_statistics.csv \
-  --max-samples-per-group 500
+python -m src.csv_to_images \
+  --input data/single \
+  --output outputs/csv_images \
+  --max-files 20
 ```
 
-`feature_statistics` 不依赖模型，可以在训练前或训练后执行。
+脚本会自动查找 `DATA` 行，只读取其后的两列数值：第一列作为时间横轴，第二列作为幅值纵轴。支持逗号、空格和 tab 分隔；单个 CSV 失败时只打印 warning，不中断整体转换。
 
-## 命令依赖关系
+## 如何确认训练数据
 
-- `check_paths`：不依赖其他输出。
-- `build_real_index`：依赖 `data/single` 和 `data/real_dataset`。
-- `split_real_dataset`：依赖 `outputs/reports/real_dataset_index.csv`。
-- `train`：依赖 `outputs/reports/real_dataset_split.csv`。
-- `evaluate`：依赖 `outputs/checkpoints/best.pt` 和 `outputs/reports/real_dataset_split.csv`。
-- `search_thresholds`：依赖 `outputs/checkpoints/best.pt` 和 `outputs/reports/real_dataset_split.csv`。
-- `feature_statistics`：依赖 `outputs/reports/real_dataset_split.csv`，不依赖 `outputs/checkpoints/best.pt`。
-
-顺序必须注意：
-
-- `outputs/reports/best_thresholds.json` 必须在模型训练完成后才能生成。
-- `threshold_search` 依赖 `outputs/checkpoints/best.pt`。
-- `evaluate` 依赖 `outputs/checkpoints/best.pt`。
-- `train` 依赖 `outputs/reports/real_dataset_split.csv`。
-
-## 如何确认训练数据就是指定的数据
-
-训练时最终使用的不是 README 文字本身，而是 `configs/train.yaml` 指向的 split CSV 文件。当前配置中真正训练数据是：
+当前训练文件来自：
 
 ```text
 outputs/reports/real_dataset_split.csv 中 split == train 的所有行
 ```
 
-当前流程如下：
-
-1. `training_data.mode: real_only` 表示只使用真实 CSV，不使用 `data/mixed` 合成数据。
-2. 训练前会从 `data/single` 和 `data/real_dataset` 递归扫描 CSV，生成 `outputs/reports/real_dataset_index.csv`。
-3. `outputs/reports/real_dataset_split.csv` 负责把样本分成 `train`、`val`、`test`。
-4. 训练阶段只加载 `outputs/reports/real_dataset_split.csv` 中 `split == train` 的行。
-
-可以用下面命令打印实际训练文件和每种标签组合数量：
+打印实际训练文件和标签组合数量：
 
 ```bash
 python - <<'PY'
@@ -316,104 +201,36 @@ for label, count in sorted(counts.items()):
 PY
 ```
 
-## 当前推荐配置
+## source5 过预测诊断
 
-```yaml
-training_data:
-  mode: real_only
+如果评估显示 `source_5` 经常被误报，重点查看：
 
-balanced_train:
-  enabled: false
+- `source5_false_positive_rate`
+- `source5_over_prediction_rate`
+- `double_to_triple_rate`
+- `combo_confusion`
+- `[1,1,0] -> [1,1,1]` 的比例
 
-real_data:
-  split_file: outputs/reports/real_dataset_split.csv
-
-loss:
-  type: asymmetric_bce
-  gamma_neg: 4
-  gamma_pos: 1
-  label_smoothing: 0.05
-
-early_stopping:
-  monitor: exact_match
-```
-
-## CSV 批量转图片查看数据
-
-可以把输入目录下所有 CSV 时域数据递归转换成 PNG，输出目录结构和输入目录结构保持一致，只把 `.csv` 后缀改成 `.png`。
-
-示例：
-
-```text
-data/single/source_1/600.000MHz/000001.csv
-outputs/csv_images/source_1/600.000MHz/000001.png
-```
-
-执行完整转换：
+诊断特征能量：
 
 ```bash
-python -m src.csv_to_images \
-  --input data/single \
-  --output outputs/csv_images
+python -m src.feature_statistics \
+  --split outputs/reports/real_dataset_split.csv \
+  --split-name train \
+  --output outputs/reports/feature_statistics.csv \
+  --max-samples-per-group 500
 ```
 
-先测试 20 个文件：
+## 可选 balanced split
+
+当前默认不推荐 quota-balanced split。只有复现实验或明确需要配额筛选时，才启用 `balanced_train.enabled: true` 并生成：
 
 ```bash
-python -m src.csv_to_images \
-  --input data/single \
-  --output outputs/csv_images \
-  --max-files 20
-```
-
-脚本会自动查找 `DATA` 行，只读取其后的两列数值：第一列作为时间横轴，第二列作为幅值纵轴。支持逗号、空格和 tab 分隔；单个 CSV 失败时只打印 warning，不中断整体转换。
-
-## 如何执行阈值搜索
-
-阈值搜索必须在训练完成后执行，因为它依赖 `outputs/checkpoints/best.pt`。对 `source_1`、`source_3`、`source_5` 分别搜索独立阈值：
-
-```bash
-python -m src.search_thresholds \
-  --model outputs/checkpoints/best.pt \
-  --real-split test \
-  --metric exact_match \
-  --start 0.3 \
-  --end 0.95 \
-  --step 0.05 \
-  --min-source5-threshold 0.6 \
-  --output outputs/reports/threshold_search.csv
-```
-
-输出：
-
-- `outputs/reports/threshold_search.csv`
-- `outputs/reports/best_thresholds.json`
-
-使用最佳阈值重新评估：
-
-```bash
-python -m src.evaluate \
-  --model outputs/checkpoints/best.pt \
-  --real-split test \
-  --thresholds-json outputs/reports/best_thresholds.json
-```
-
-## 如何解读关键输出
-
-`source5_over_prediction_rate`：
-
-真实不含 `source_5` 的样本中，被预测成含 `source_5` 的比例。越高说明 source_5 误报越严重。
-
-`double_source_predict_as_triple_rate`：
-
-真实标签 source 数量为 2，但预测 source 数量为 3 的比例。这个值高说明双源经常被扩张成三源。
-
-`combo_confusion`：
-
-组合级混淆矩阵。例如真实 `[1,1,0]` 被预测成 `[1,1,1]` 很多，说明 source_1 + source_3 组合里 source_5 被频繁误加。对应 CSV 文件是：
-
-```text
-outputs/reports/combo_confusion.csv
+python -m src.create_balanced_split \
+  --input outputs/reports/real_dataset_split.csv \
+  --output outputs/reports/real_dataset_split_balanced.csv \
+  --quota 100=2100,010=2100,001=2100,110=5000,101=3500,011=3500,111=3000 \
+  --seed 42
 ```
 
 ## 输出文件
@@ -422,79 +239,11 @@ outputs/reports/combo_confusion.csv
 - `outputs/reports/real_dataset_summary.json`：真实数据基础统计。
 - `outputs/reports/real_dataset_split.csv`：训练、验证、测试划分。
 - `outputs/reports/label_distribution.json`：标签、source、group、ratio 分布诊断。
-- `outputs/reports/label_distribution.csv`：分布诊断表格版。
 - `outputs/reports/eval_report.json`：评估报告。
 - `outputs/reports/error_analysis.csv`：逐样本错误分析。
 - `outputs/reports/combo_confusion.csv`：组合混淆矩阵。
 - `outputs/reports/threshold_search.csv`：阈值搜索结果。
 - `outputs/reports/best_thresholds.json`：最佳 per-class 阈值。
-- `outputs/csv_images`：CSV 时域数据批量转图片输出目录。
 - `outputs/reports/feature_statistics.csv`：特征统计明细。
 - `outputs/reports/feature_statistics_summary.json`：特征统计聚合摘要。
-
-## 历史方案/不推荐
-
-当前配置不再推荐按配额筛选训练集。除非你在复现实验历史结果，否则不要把旧的平衡划分流程作为主流程。
-
-旧方案包括：`balanced_train`、`create_balanced_split`、`quota 100=2100...`、`real_dataset_split_balanced.csv` 和 `selected_for_train`。
-
-## source5 过预测诊断流程
-
-当评估结果显示 `source_5` 总是被预测为存在，或 `source5_false_positive_rate` / `source5_over_prediction_rate` 明显偏高时，建议按以下顺序定位根因：
-
-1. **检查 110 -> 111 错误样本的 source5 概率边界**
-
-   重新评估测试集并生成专项分析文件：
-
-   ```bash
-   python -m src.evaluate \
-     --model outputs/checkpoints/best.pt \
-     --real-split test \
-     --threshold 0.5
-   ```
-
-   查看 `outputs/reports/analysis_110_to_111.csv` 和 `outputs/reports/eval_report.json` 中的 `analysis_110_to_111`。重点关注 `source_5_margin = source_5_prob - source_5_threshold`：
-
-   - 如果 margin 普遍很小，说明很多错误只是刚刚越过阈值，优先排查阈值。
-   - 如果 margin 普遍很大，说明模型对错误的 `source_5` 判断非常自信，需要继续排查概率分布、特征能量或训练数据偏差。
-
-2. **执行 per-class threshold search**
-
-   对 `source_1`、`source_3` 在 `0.3 ~ 0.95` 搜索，对 `source_5` 至少从 `0.6` 开始搜索：
-
-   ```bash
-   python -m src.search_thresholds \
-     --model outputs/checkpoints/best.pt \
-     --real-split test \
-     --metric exact_match \
-     --start 0.3 \
-     --end 0.95 \
-     --step 0.05 \
-     --min-source5-threshold 0.6 \
-     --output outputs/reports/threshold_search.csv
-   ```
-
-   结果会按 `exact_match` 从高到低排序保存到 `outputs/reports/threshold_search.csv`，最佳阈值保存到 `outputs/reports/best_thresholds.json`。如果提高 `source_5` 阈值后 `exact_match` 改善且 `double_to_triple_rate`、`source5_false_positive_rate` 下降，说明主要是阈值问题。
-
-3. **统计原始信号与频谱能量特征**
-
-   对训练集按 group 统计原始信号、FFT 和 STFT 特征。该命令不依赖模型，可以在训练前或训练后执行：
-
-   ```bash
-   python -m src.feature_statistics \
-     --split outputs/reports/real_dataset_split.csv \
-     --split-name train \
-     --output outputs/reports/feature_statistics.csv \
-     --max-samples-per-group 500
-   ```
-
-   明细输出为 `outputs/reports/feature_statistics.csv`，按 group 聚合结果输出为 `outputs/reports/feature_statistics_summary.json`。重点查看 summary 中的 `source_energy_comparison`，比较 `source_1_only`、`source_3_only`、`source_5_only` 的 `signal_rms_mean`、`signal_energy_mean`、`fft_total_energy_mean`、`stft_energy_mean`。
-
-4. **如果 source5 能量明显更强，优先考虑能量相关修正**
-
-   如果 `source_5` 的 RMS、原始能量或 STFT energy 明显高于 `source_1` / `source_3`，模型可能学到了幅值捷径。后续可考虑：
-
-   - RMS normalize
-   - 幅值随机缩放
-   - 能量标准化
-   - 训练时做 amplitude augmentation
+- `outputs/csv_images`：CSV 时域数据批量转图片输出目录。

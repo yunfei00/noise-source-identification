@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from src.features import compute_stft_feature, fix_length, normalize_signal, read_signal_csv
+from src.features import apply_signal_normalization, compute_stft_feature, fix_length, read_signal_csv
 from src.infer import load_checkpoint
 
 
@@ -31,8 +31,12 @@ def _stats(signal: np.ndarray, stft_feature: np.ndarray) -> dict[str, float]:
 def _feature(signal: np.ndarray, config: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
     data_config = config.get("data", {})
     stft_config = config.get("stft", {})
+    preprocessing_config = config.get("preprocessing", {})
     fixed = fix_length(signal, int(data_config.get("signal_length", 4096)))
-    normalized = normalize_signal(fixed)
+    normalized = apply_signal_normalization(
+        fixed,
+        str(preprocessing_config.get("signal_normalization", "standardize")),
+    )
     feature = compute_stft_feature(
         normalized,
         sample_rate=int(data_config.get("sample_rate", 1_000_000)),
@@ -40,6 +44,7 @@ def _feature(signal: np.ndarray, config: dict[str, Any]) -> tuple[np.ndarray, np
         noverlap=int(stft_config.get("noverlap", 128)),
         target_freq_bins=int(stft_config.get("target_freq_bins", 128)),
         target_time_bins=int(stft_config.get("target_time_bins", 64)),
+        magnitude_scale=str(stft_config.get("magnitude_scale", "log1p")),
     )
     return fixed.astype(np.float32, copy=False), feature
 

@@ -18,6 +18,7 @@ from torch.utils.data import ConcatDataset, DataLoader, WeightedRandomSampler
 from torch.utils.data import Dataset
 
 from src.build_real_index import build_real_index, discover_class_names
+from src.create_balanced_split import create_balanced_split
 from src.dataset import RealCsvDataset, SyntheticNpyDataset
 from src.model_cnn import NoiseCNN
 from src.split_real_dataset import split_real_dataset
@@ -325,6 +326,40 @@ def prepare_real_split(config: dict, class_names: list[str]) -> Path | None:
             include_combo=True,
         )
 
+    balanced_config = config.get("balanced_train", {})
+    balanced_enabled = bool(balanced_config.get("enabled", False))
+    if balanced_enabled:
+        quota = balanced_config.get("quota", {})
+        if not isinstance(quota, dict) or not quota:
+            raise ValueError("balanced_train.enabled is true, so balanced_train.quota must be a non-empty mapping")
+        base_split_path = Path(balanced_config.get("input_split_file", report_dir / "real_dataset_split.csv"))
+        split_path = Path(balanced_config.get("output_split_file", requested_split_path))
+        if rebuild_real_files or not base_split_path.exists():
+            if rebuild_real_files:
+                print(f"real_only mode splits all indexed real samples; rebuilding {base_split_path}")
+            else:
+                print(f"real dataset base split not found; building {base_split_path}")
+            split_real_dataset(
+                index=index_path,
+                output=base_split_path,
+                train_ratio=float(legacy_split_config.get("train_ratio", 0.7)),
+                val_ratio=float(legacy_split_config.get("val_ratio", 0.15)),
+                test_ratio=float(legacy_split_config.get("test_ratio", 0.15)),
+                seed=int(legacy_split_config.get("seed", config.get("seed", 42))),
+            )
+        if rebuild_real_files or not split_path.exists():
+            if rebuild_real_files:
+                print(f"real_only mode applies balanced train quotas; rebuilding {split_path}")
+            else:
+                print(f"balanced train split not found; building {split_path}")
+            create_balanced_split(
+                input_path=base_split_path,
+                output_path=split_path,
+                quota={str(combo): int(count) for combo, count in quota.items()},
+                seed=int(balanced_config.get("seed", config.get("seed", 42))),
+            )
+        return split_path
+
     split_path = requested_split_path
     if not split_path.exists():
         if rebuild_real_files:
@@ -504,6 +539,7 @@ def make_loader(
     real_split_path: str | Path | None = None,
 ) -> DataLoader:
     data_config = config.get("data", {})
+    preprocessing_config = config.get("preprocessing", {})
     train_config = config.get("train", {})
     if class_names is None:
         class_names = load_class_names(data_config.get("mixed_dir", "data/mixed"), config)
@@ -785,6 +821,8 @@ def train(config: dict) -> None:
     print(f"epochs={epochs}")
     print(f"sampler.enabled={sampler_enabled}")
     print(f"sampler.strategy={sampler_strategy}")
+    print(f"preprocessing.signal_normalization={preprocessing_config.get('signal_normalization', 'standardize')}")
+    print(f"stft.magnitude_scale={config.get('stft', {}).get('magnitude_scale', 'log1p')}")
     print(f"synthetic_samples={synthetic_samples}")
     print(f"synthetic_ratio={synthetic_ratio}")
     print(f"real_ratio={real_ratio}")

@@ -10,7 +10,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from src.features import compute_stft_feature, fix_length, normalize_signal, read_signal_csv
+from src.features import apply_signal_normalization, compute_stft_feature, fix_length, read_signal_csv
 
 _SOURCE_NAME_RE = re.compile(r"source_\d+")
 _UNKNOWN_GROUP_PREFIXES = ("unknown", "background")
@@ -81,6 +81,8 @@ class SyntheticNpyDataset(Dataset):
         self.noverlap = int(stft_config.get("noverlap", 128))
         self.target_freq_bins = int(stft_config.get("target_freq_bins", 128))
         self.target_time_bins = int(stft_config.get("target_time_bins", 64))
+        self.magnitude_scale = str(stft_config.get("magnitude_scale", "log1p"))
+        self.signal_normalization = str(config.get("preprocessing", {}).get("signal_normalization", "standardize"))
 
     def __len__(self) -> int:
         return len(self.x_files)
@@ -92,12 +94,13 @@ class SyntheticNpyDataset(Dataset):
 
     def _to_tensors(self, signal: np.ndarray, label: np.ndarray) -> tuple[torch.Tensor, torch.Tensor]:
         feature = compute_stft_feature(
-            signal,
+            apply_signal_normalization(signal, self.signal_normalization),
             sample_rate=self.sample_rate,
             nperseg=self.nperseg,
             noverlap=self.noverlap,
             target_freq_bins=self.target_freq_bins,
             target_time_bins=self.target_time_bins,
+            magnitude_scale=self.magnitude_scale,
         )
         x = torch.from_numpy(feature).unsqueeze(0).float()
         y = torch.from_numpy(label).float()
@@ -216,6 +219,8 @@ class RealCsvDataset(SyntheticNpyDataset):
             "noverlap": self.noverlap,
             "target_freq_bins": self.target_freq_bins,
             "target_time_bins": self.target_time_bins,
+            "magnitude_scale": self.magnitude_scale,
+            "signal_normalization": self.signal_normalization,
         }
         return hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:12]
 
@@ -231,7 +236,7 @@ class RealCsvDataset(SyntheticNpyDataset):
 
         signal = read_signal_csv(csv_path)
         signal = fix_length(signal, self.signal_length)
-        signal = normalize_signal(signal)
+        signal = apply_signal_normalization(signal, self.signal_normalization)
         feature = compute_stft_feature(
             signal,
             sample_rate=self.sample_rate,
@@ -239,6 +244,7 @@ class RealCsvDataset(SyntheticNpyDataset):
             noverlap=self.noverlap,
             target_freq_bins=self.target_freq_bins,
             target_time_bins=self.target_time_bins,
+            magnitude_scale=self.magnitude_scale,
         )
 
         if self.cache_enabled:

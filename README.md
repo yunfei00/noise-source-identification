@@ -201,6 +201,9 @@ real_data:
   index_file: outputs/reports/real_dataset_index.csv
   split_file: outputs/reports/real_dataset_split.csv
 
+preprocessing:
+  signal_normalization: none
+
 loss:
   type: asymmetric_bce
   gamma_neg: 4
@@ -209,6 +212,9 @@ loss:
 
 early_stopping:
   monitor: exact_match
+
+stft:
+  magnitude_scale: absolute
 ```
 
 In `real_only` mode:
@@ -217,6 +223,11 @@ In `real_only` mode:
 - `data.num_samples` is not used.
 - Samples are loaded lazily from CSV files listed in `real_data.split_file`.
 - An empty split file raises a clear training error.
+
+The current feature path preserves absolute numeric scale:
+
+- `preprocessing.signal_normalization: none` keeps raw time-domain amplitude values.
+- `stft.magnitude_scale: absolute` uses linear STFT magnitude, not dB or log-compressed features.
 
 ## How training samples are fixed
 
@@ -255,11 +266,17 @@ for label, count in sorted(counts.items()):
 PY
 ```
 
-## Historical / not recommended
+## Optional balanced split
 
-Quota-selected balanced training is not the recommended workflow for the current configuration. Do not use the old balanced split flow unless you are intentionally reproducing historical experiments.
+Quota-selected balanced training is not the recommended workflow for the current configuration. If you intentionally enable `balanced_train.enabled: true`, generate the quota-selected training split first:
 
-The deprecated flow included `balanced_train`, `create_balanced_split`, quota strings such as `100=2100,...`, `outputs/reports/real_dataset_split_balanced.csv`, and the `selected_for_train` column.
+```bash
+python -m src.create_balanced_split \
+  --input outputs/reports/real_dataset_split.csv \
+  --output outputs/reports/real_dataset_split_balanced.csv \
+  --quota 100=2100,010=2100,001=2100,110=5000,101=3500,011=3500,111=3000 \
+  --seed 42
+```
 
 ## Outputs
 

@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from src.features import compute_stft_feature, fix_length, normalize_signal, read_signal_csv
+from src.features import apply_signal_normalization, compute_stft_feature, fix_length, read_signal_csv
 from src.model_cnn import NoiseCNN
 from src.train import resolve_device
 
@@ -44,9 +44,10 @@ def infer(model_path: str | Path, input_path: str | Path, device_name: str = "au
 
     data_config = config.get("data", {})
     stft_config = config.get("stft", {})
+    preprocessing_config = config.get("preprocessing", {})
     signal = read_signal_csv(input_path)
     signal = fix_length(signal, int(data_config.get("signal_length", 4096)))
-    signal = normalize_signal(signal)
+    signal = apply_signal_normalization(signal, str(preprocessing_config.get("signal_normalization", "standardize")))
     feature = compute_stft_feature(
         signal,
         sample_rate=int(data_config.get("sample_rate", 1_000_000)),
@@ -54,6 +55,7 @@ def infer(model_path: str | Path, input_path: str | Path, device_name: str = "au
         noverlap=int(stft_config.get("noverlap", 128)),
         target_freq_bins=int(stft_config.get("target_freq_bins", 128)),
         target_time_bins=int(stft_config.get("target_time_bins", 64)),
+        magnitude_scale=str(stft_config.get("magnitude_scale", "log1p")),
     )
 
     model = NoiseCNN(num_classes=len(class_names)).to(device)

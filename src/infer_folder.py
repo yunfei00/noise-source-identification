@@ -12,7 +12,7 @@ import numpy as np
 import torch
 from sklearn.metrics import precision_recall_fscore_support
 
-from src.features import compute_stft_feature, fix_length, normalize_signal, read_signal_csv
+from src.features import apply_signal_normalization, compute_stft_feature, fix_length, read_signal_csv
 from src.infer import load_checkpoint
 from src.model_cnn import NoiseCNN
 from src.train import resolve_device
@@ -92,10 +92,10 @@ def find_csv_files(input_dir: str | Path) -> list[Path]:
     return [csv_path for _, csv_path in iter_group_csv_files(input_dir)]
 
 
-def _feature_from_csv(csv_path: Path, data_config: dict, stft_config: dict) -> np.ndarray:
+def _feature_from_csv(csv_path: Path, data_config: dict, stft_config: dict, preprocessing_config: dict) -> np.ndarray:
     signal = read_signal_csv(csv_path)
     signal = fix_length(signal, int(data_config.get("signal_length", 4096)))
-    signal = normalize_signal(signal)
+    signal = apply_signal_normalization(signal, str(preprocessing_config.get("signal_normalization", "standardize")))
     return compute_stft_feature(
         signal,
         sample_rate=int(data_config.get("sample_rate", 1_000_000)),
@@ -103,6 +103,7 @@ def _feature_from_csv(csv_path: Path, data_config: dict, stft_config: dict) -> n
         noverlap=int(stft_config.get("noverlap", 128)),
         target_freq_bins=int(stft_config.get("target_freq_bins", 128)),
         target_time_bins=int(stft_config.get("target_time_bins", 64)),
+        magnitude_scale=str(stft_config.get("magnitude_scale", "log1p")),
     )
 
 
@@ -130,7 +131,8 @@ def infer_csv_probabilities(
 ) -> np.ndarray:
     data_config = config.get("data", {})
     stft_config = config.get("stft", {})
-    feature = _feature_from_csv(csv_path, data_config, stft_config)
+    preprocessing_config = config.get("preprocessing", {})
+    feature = _feature_from_csv(csv_path, data_config, stft_config, preprocessing_config)
     x = torch.from_numpy(feature).unsqueeze(0).unsqueeze(0).float().to(device)
     with torch.no_grad():
         logits = model(x)

@@ -34,6 +34,8 @@ augmentation:
   source_dropout_prob: 0.0
 training_data:
   mode: real_only
+preprocessing:
+  signal_normalization: none
 balanced_train:
   enabled: false
 sampler:
@@ -83,6 +85,7 @@ stft:
   noverlap: 128
   target_freq_bins: 128
   target_time_bins: 64
+  magnitude_scale: absolute
 scheduler:
   enabled: true
   type: ReduceLROnPlateau
