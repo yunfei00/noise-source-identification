@@ -6,6 +6,7 @@ import json
 from collections import Counter
 import random
 from pathlib import Path
+from time import perf_counter
 
 import numpy as np
 import torch
@@ -16,6 +17,7 @@ import torch.nn.functional as F
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import ConcatDataset, DataLoader, WeightedRandomSampler
 from torch.utils.data import Dataset
+from tqdm.auto import tqdm
 
 from src.build_real_index import build_real_index, discover_class_names
 from src.create_balanced_split import create_balanced_split
@@ -565,6 +567,7 @@ def run_epoch(
     criterion: nn.Module,
     device: torch.device,
     optimizer: torch.optim.Optimizer | None = None,
+    progress_description: str | None = None,
 ) -> tuple[float, np.ndarray, np.ndarray]:
     is_train = optimizer is not None
     model.train(is_train)
@@ -574,7 +577,13 @@ def run_epoch(
     all_targets: list[np.ndarray] = []
 
     with torch.set_grad_enabled(is_train):
-        for x, y in loader:
+        batches = tqdm(
+            loader,
+            desc=progress_description or ("Training" if is_train else "Validation"),
+            unit="batch",
+            dynamic_ncols=True,
+        )
+        for x, y in batches:
             x = x.to(device)
             y = y.to(device)
 
@@ -591,6 +600,7 @@ def run_epoch(
             total_items += batch_size
             all_probs.append(torch.sigmoid(logits).detach().cpu().numpy())
             all_targets.append(y.detach().cpu().numpy())
+            batches.set_postfix(loss=f"{total_loss / total_items:.4f}")
 
     if total_items == 0:
         raise ValueError("DataLoader produced no batches")
@@ -705,11 +715,20 @@ def save_checkpoint(
     torch.save(checkpoint, Path(path))
 
 
+def format_duration(seconds: float) -> str:
+    """Format a duration as HH:MM:SS for training progress output."""
+    seconds = max(0, round(seconds))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
 def train(config: dict) -> None:
     seed = int(config.get("seed", 42))
     set_seed(seed)
 
     data_config = config.get("data", {})
+    preprocessing_config = config.get("preprocessing", {})
     train_config = config.get("train", {})
     early_stopping_config = config.get("early_stopping", {})
     scheduler_config = config.get("scheduler", {})
@@ -832,9 +851,24 @@ def train(config: dict) -> None:
     best_epoch = 0
     history: list[dict[str, float | int]] = []
     history_path = report_dir / "training_history.csv"
+    training_started = perf_counter()
     for epoch in range(1, epochs + 1):
-        train_loss, _, _ = run_epoch(model, train_loader, criterion, device, optimizer)
-        val_loss, val_probs, val_targets = run_epoch(model, val_loader, criterion, device)
+        epoch_started = perf_counter()
+        train_loss, _, _ = run_epoch(
+            model,
+            train_loader,
+            criterion,
+            device,
+            optimizer,
+            progress_description=f"Epoch {epoch}/{epochs} training",
+        )
+        val_loss, val_probs, val_targets = run_epoch(
+            model,
+            val_loader,
+            criterion,
+            device,
+            progress_description=f"Epoch {epoch}/{epochs} validation",
+        )
         val_metrics = compute_validation_metrics(val_probs, val_targets, threshold, class_names)
         micro_f1 = val_metrics["micro_f1"]
         macro_f1 = val_metrics["macro_f1"]
@@ -898,7 +932,10 @@ def train(config: dict) -> None:
             f"double_to_triple_rate={double_to_triple_rate:.4f} "
             f"source5_over_prediction_rate={source5_over_prediction_rate:.4f} "
             f"source5_false_positive_rate={source5_false_positive_rate:.4f} "
-            f"lr={learning_rate:.6g}"
+            f"lr={learning_rate:.6g} "
+            f"epoch_time={format_duration(perf_counter() - epoch_started)} "
+            f"elapsed={format_duration(perf_counter() - training_started)} "
+            f"eta={format_duration((perf_counter() - training_started) / epoch * (epochs - epoch))}"
         )
 
         if early_stopping is not None and early_stopping.step(current_metric):
