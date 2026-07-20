@@ -201,10 +201,12 @@ class AsymmetricBCEWithLogitsLoss(nn.Module):
         gamma_pos: float = 1.0,
         label_smoothing: float = 0.05,
         class_fp_penalty: torch.Tensor | None = None,
+        class_fn_penalty: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
         self.register_buffer("pos_weight", pos_weight if pos_weight is not None else None)
         self.register_buffer("class_fp_penalty", class_fp_penalty if class_fp_penalty is not None else None)
+        self.register_buffer("class_fn_penalty", class_fn_penalty if class_fn_penalty is not None else None)
         self.gamma_neg = float(gamma_neg)
         self.gamma_pos = float(gamma_pos)
         self.label_smoothing = float(label_smoothing)
@@ -236,7 +238,50 @@ class AsymmetricBCEWithLogitsLoss(nn.Module):
         if self.class_fp_penalty is not None:
             class_penalty = self.class_fp_penalty.view(1, -1).to(device=targets.device, dtype=targets.dtype)
             weights = torch.where(targets > 0.5, weights, weights * class_penalty)
+        if self.class_fn_penalty is not None:
+            class_penalty = self.class_fn_penalty.view(1, -1).to(device=targets.device, dtype=targets.dtype)
+            weights = torch.where(targets > 0.5, weights * class_penalty, weights)
         return (loss * weights).mean()
+
+
+class MultiTaskLoss(nn.Module):
+    """Combine multilabel loss with source-combination and source-count losses."""
+
+    uses_auxiliary_outputs = True
+
+    def __init__(self, multilabel_loss: nn.Module, combo_weight: float, count_weight: float) -> None:
+        super().__init__()
+        if combo_weight < 0.0 or count_weight < 0.0:
+            raise ValueError("Auxiliary loss weights must be non-negative")
+        self.multilabel_loss = multilabel_loss
+        self.combo_weight = float(combo_weight)
+        self.count_weight = float(count_weight)
+
+    def forward(
+        self,
+        outputs: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        targets: torch.Tensor,
+    ) -> torch.Tensor:
+        logits, combo_logits, count_logits = outputs
+        binary_targets = (targets > 0.5).long()
+        source_counts = binary_targets.sum(dim=1)
+        if torch.any(source_counts < 1):
+            raise ValueError("Auxiliary heads require every sample to contain at least one source")
+
+        bit_weights = 2 ** torch.arange(
+            targets.shape[1] - 1,
+            -1,
+            -1,
+            device=targets.device,
+            dtype=torch.long,
+        )
+        combo_targets = (binary_targets * bit_weights.view(1, -1)).sum(dim=1) - 1
+        count_targets = source_counts - 1
+        return (
+            self.multilabel_loss(logits, targets)
+            + self.combo_weight * F.cross_entropy(combo_logits, combo_targets)
+            + self.count_weight * F.cross_entropy(count_logits, count_targets)
+        )
 
 
 def build_criterion(config: dict, train_labels: np.ndarray, class_names: list[str], device: torch.device) -> nn.Module:
@@ -249,8 +294,8 @@ def build_criterion(config: dict, train_labels: np.ndarray, class_names: list[st
     if use_pos_weight:
         pos_weight = compute_pos_weight(train_labels, class_names, device)
     if loss_type == "bce":
-        return nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-    if loss_type == "asymmetric_bce":
+        criterion: nn.Module = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    elif loss_type == "asymmetric_bce":
         class_fp_config = loss_config.get("class_fp_penalty", {})
         if class_fp_config is None:
             class_fp_config = {}
@@ -264,6 +309,19 @@ def build_criterion(config: dict, train_labels: np.ndarray, class_names: list[st
             for class_name in class_names
         ]
         class_fp_penalty = torch.as_tensor(class_fp_values, dtype=torch.float32, device=device)
+        class_fn_config = loss_config.get("class_fn_penalty", {})
+        if class_fn_config is None:
+            class_fn_config = {}
+        if not isinstance(class_fn_config, dict):
+            raise ValueError("loss.class_fn_penalty must be a mapping from class name to penalty")
+        unknown_fn_classes = sorted(set(class_fn_config).difference(class_names))
+        for class_name in unknown_fn_classes:
+            print(f"warning: ignoring loss.class_fn_penalty for unknown class: {class_name}")
+        class_fn_values = [
+            float(class_fn_config.get(class_name, 1.0))
+            for class_name in class_names
+        ]
+        class_fn_penalty = torch.as_tensor(class_fn_values, dtype=torch.float32, device=device)
         print(f"loss.gamma_neg={float(loss_config.get('gamma_neg', 4.0))}")
         print(f"loss.gamma_pos={float(loss_config.get('gamma_pos', 1.0))}")
         print(f"loss.label_smoothing={float(loss_config.get('label_smoothing', 0.05))}")
@@ -271,14 +329,29 @@ def build_criterion(config: dict, train_labels: np.ndarray, class_names: list[st
             "loss.class_fp_penalty="
             + json.dumps({name: value for name, value in zip(class_names, class_fp_values)}, ensure_ascii=False)
         )
-        return AsymmetricBCEWithLogitsLoss(
+        print(
+            "loss.class_fn_penalty="
+            + json.dumps({name: value for name, value in zip(class_names, class_fn_values)}, ensure_ascii=False)
+        )
+        criterion = AsymmetricBCEWithLogitsLoss(
             pos_weight=pos_weight,
             gamma_neg=float(loss_config.get("gamma_neg", 4.0)),
             gamma_pos=float(loss_config.get("gamma_pos", 1.0)),
             label_smoothing=float(loss_config.get("label_smoothing", 0.05)),
             class_fp_penalty=class_fp_penalty,
+            class_fn_penalty=class_fn_penalty,
         )
-    raise ValueError(f"Unsupported loss.type: {loss_type}")
+    else:
+        raise ValueError(f"Unsupported loss.type: {loss_type}")
+
+    auxiliary_config = config.get("model", {}).get("auxiliary_heads", {})
+    if bool(auxiliary_config.get("enabled", False)):
+        criterion = MultiTaskLoss(
+            criterion,
+            combo_weight=float(auxiliary_config.get("combo_loss_weight", 0.3)),
+            count_weight=float(auxiliary_config.get("count_loss_weight", 0.2)),
+        )
+    return criterion
 
 def training_data_config(config: dict) -> tuple[str, float, float]:
     data_mode_config = config.get("training_data", {})
@@ -587,8 +660,13 @@ def run_epoch(
             x = x.to(device)
             y = y.to(device)
 
-            logits = model(x)
-            loss = criterion(logits, y)
+            if bool(getattr(criterion, "uses_auxiliary_outputs", False)):
+                outputs = model.forward_with_auxiliary(x)
+                logits = outputs[0]
+                loss = criterion(outputs, y)
+            else:
+                logits = model(x)
+                loss = criterion(logits, y)
 
             if optimizer is not None:
                 optimizer.zero_grad(set_to_none=True)
@@ -776,7 +854,8 @@ def train(config: dict) -> None:
         pin_memory=torch.cuda.is_available(),
     )
 
-    model = NoiseCNN(num_classes=len(class_names)).to(device)
+    auxiliary_enabled = bool(config.get("model", {}).get("auxiliary_heads", {}).get("enabled", False))
+    model = NoiseCNN(num_classes=len(class_names), auxiliary_heads=auxiliary_enabled).to(device)
     train_labels = _dataset_labels(train_dataset)
     criterion = build_criterion(config, train_labels, class_names, device)
     optimizer = torch.optim.Adam(model.parameters(), lr=float(train_config.get("lr", 1e-3)))

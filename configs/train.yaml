@@ -60,16 +60,25 @@ train:
   lr: 0.001
   device: auto
   num_workers: 0
+model:
+  auxiliary_heads:
+    enabled: true
+    combo_loss_weight: 0.3
+    count_loss_weight: 0.2
 loss:
   type: asymmetric_bce
   use_pos_weight: false
-  gamma_neg: 4
-  gamma_pos: 1
-  label_smoothing: 0.05
+  gamma_neg: 3
+  gamma_pos: 0
+  label_smoothing: 0.02
   class_fp_penalty:
     source_1: 1.2
     source_3: 1.2
-    source_5: 5.0
+    source_5: 1.5
+  class_fn_penalty:
+    source_1: 1.0
+    source_3: 1.0
+    source_5: 2.0
 early_stopping:
   enabled: true
   monitor: exact_match

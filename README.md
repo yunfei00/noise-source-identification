@@ -126,12 +126,11 @@ python -m src.evaluate \
 ```bash
 python -m src.search_thresholds \
   --model outputs/checkpoints/best.pt \
-  --real-split test \
+  --real-split val \
   --metric exact_match \
-  --start 0.3 \
+  --start 0.1 \
   --end 0.95 \
   --step 0.05 \
-  --min-source5-threshold 0.6 \
   --output outputs/reports/threshold_search.csv
 ```
 

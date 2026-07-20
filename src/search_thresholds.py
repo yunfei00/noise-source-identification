@@ -53,7 +53,8 @@ def _load_probs_and_targets(
         loader = make_loader(config, split, shuffle=False, class_names=class_names)
         eval_split = split
 
-    model = NoiseCNN(num_classes=len(class_names)).to(device)
+    auxiliary_enabled = bool(config.get("model", {}).get("auxiliary_heads", {}).get("enabled", False))
+    model = NoiseCNN(num_classes=len(class_names), auxiliary_heads=auxiliary_enabled).to(device)
     model.load_state_dict(checkpoint["model_state"])
     probs, targets = collect_probabilities(model, loader, device)
     return probs, targets, class_names, eval_split, locals().get("groups")
@@ -64,7 +65,7 @@ def search_thresholds(
     split: str = "test",
     real_split: str | None = None,
     metric: str = "exact_match",
-    start: float = 0.3,
+    start: float = 0.1,
     end: float = 0.9,
     step: float = 0.05,
     output: str | Path = "outputs/reports/threshold_search.csv",
@@ -182,7 +183,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--split", choices=("train", "val", "test"), default="test", help="Synthetic dataset split.")
     parser.add_argument("--real-split", choices=("train", "val", "test"), help="Evaluate a real_dataset_split.csv split.")
     parser.add_argument("--metric", choices=METRIC_KEYS, default="exact_match", help="Metric to maximize.")
-    parser.add_argument("--start", type=float, default=0.3, help="Inclusive start threshold.")
+    parser.add_argument("--start", type=float, default=0.1, help="Inclusive start threshold.")
     parser.add_argument("--end", type=float, default=0.9, help="Inclusive end threshold.")
     parser.add_argument("--step", type=float, default=0.05, help="Threshold step size.")
     parser.add_argument("--output", type=Path, default=Path("outputs/reports/threshold_search.csv"), help="Output CSV path.")

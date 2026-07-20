@@ -6,13 +6,17 @@ import unittest
 from pathlib import Path
 
 import numpy as np
+import torch
+from torch import nn
 
 from src.build_real_index import build_real_index
 from src.dataset import parse_group_label
 from src.evaluate import compute_metrics
 from src.features import apply_signal_normalization, compute_stft_feature
+from src.model_cnn import NoiseCNN
 from src.search_thresholds import threshold_values
 from src.split_real_dataset import split_rows
+from src.train import AsymmetricBCEWithLogitsLoss, MultiTaskLoss
 
 
 class ThreeSourceRealDatasetTest(unittest.TestCase):
@@ -112,6 +116,59 @@ class ThreeSourceRealDatasetTest(unittest.TestCase):
         signal = np.asarray([1.0, -2.0, 3.0], dtype=np.float32)
         normalized = apply_signal_normalization(signal, "none")
         np.testing.assert_allclose(normalized, signal)
+
+    def test_auxiliary_heads_produce_multilabel_combo_and_count_logits(self) -> None:
+        model = NoiseCNN(num_classes=3, auxiliary_heads=True)
+        logits, combo_logits, count_logits = model.forward_with_auxiliary(
+            torch.randn(2, 1, 128, 64)
+        )
+
+        self.assertEqual(tuple(logits.shape), (2, 3))
+        self.assertEqual(tuple(combo_logits.shape), (2, 7))
+        self.assertEqual(tuple(count_logits.shape), (2, 3))
+
+    def test_multitask_loss_accepts_all_seven_nonempty_combinations(self) -> None:
+        targets = torch.tensor(
+            [
+                [1, 0, 0],
+                [0, 1, 0],
+                [0, 0, 1],
+                [1, 1, 0],
+                [1, 0, 1],
+                [0, 1, 1],
+                [1, 1, 1],
+            ],
+            dtype=torch.float32,
+        )
+        outputs = (
+            torch.zeros(7, 3, requires_grad=True),
+            torch.zeros(7, 7, requires_grad=True),
+            torch.zeros(7, 3, requires_grad=True),
+        )
+        criterion = MultiTaskLoss(nn.BCEWithLogitsLoss(), combo_weight=0.3, count_weight=0.2)
+
+        loss = criterion(outputs, targets)
+        loss.backward()
+
+        self.assertTrue(torch.isfinite(loss))
+
+    def test_source_specific_fn_penalty_increases_positive_loss(self) -> None:
+        logits = torch.tensor([[0.0, 0.0, -2.0]])
+        targets = torch.tensor([[0.0, 0.0, 1.0]])
+        baseline = AsymmetricBCEWithLogitsLoss(
+            gamma_neg=0,
+            gamma_pos=0,
+            label_smoothing=0,
+            class_fn_penalty=torch.ones(3),
+        )
+        penalized = AsymmetricBCEWithLogitsLoss(
+            gamma_neg=0,
+            gamma_pos=0,
+            label_smoothing=0,
+            class_fn_penalty=torch.tensor([1.0, 1.0, 2.0]),
+        )
+
+        self.assertGreater(float(penalized(logits, targets)), float(baseline(logits, targets)))
 
 
 if __name__ == "__main__":

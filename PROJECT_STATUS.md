@@ -1,6 +1,6 @@
 # Project Status
 
-Updated: 2026-07-15
+Updated: 2026-07-20
 
 ## Current Goal
 
@@ -10,7 +10,20 @@ The project identifies three noise sources from CSV time-domain signals:
 - `source_3`
 - `source_5`
 
-The current business target is to push real-data exact match accuracy toward 95%. This has not been proven yet. The main known failure mode is still expected to be source_5 over-prediction, especially true `[1,1,0]` samples being predicted as `[1,1,1]`.
+The current business target is to push real-data exact match accuracy toward 95%. This has not been proven yet. The latest measured failure mode is broad under-prediction, led by very low `source_5` recall; `[1,1,0]` to `[1,1,1]` errors still matter but are no longer the dominant diagnosis.
+
+## Latest Relayed Baseline
+
+The latest company-data test result was relayed manually because the dataset is not available in this workspace:
+
+- thresholds: `source_1=0.55`, `source_3=0.55`, `source_5=0.60`
+- micro F1: `0.7837`
+- exact match: `0.4447`
+- over-prediction rate: `0.2136`
+- under-prediction rate: `0.4780`
+- source_5 precision / recall / F1: `0.9560 / 0.4117 / 0.5756`
+
+This changes the diagnosis: source_5 under-detection is the dominant problem. The old source_5 false-positive penalty and the forced `source_5 >= 0.60` threshold search constraint were too aggressive.
 
 ## Current Recommended Training Mode
 
@@ -32,6 +45,10 @@ sampler:
 
 stft:
   magnitude_scale: absolute
+
+model:
+  auxiliary_heads:
+    enabled: true
 ```
 
 Important details:
@@ -62,6 +79,8 @@ Important details:
   - `sampler.strategy: label_combo`
   - asymmetric BCE style loss
   - exact-match early stopping
+  - separate class-specific false-negative penalties
+  - auxiliary 7-combination and 1/2/3-source-count heads
 
 - Threshold search:
   - per-class threshold grid search
@@ -117,12 +136,11 @@ python -m src.evaluate \
 
 python -m src.search_thresholds \
   --model outputs/checkpoints/best.pt \
-  --real-split test \
+  --real-split val \
   --metric exact_match \
-  --start 0.3 \
+  --start 0.1 \
   --end 0.95 \
   --step 0.05 \
-  --min-source5-threshold 0.6 \
   --output outputs/reports/threshold_search.csv
 
 python -m src.evaluate \

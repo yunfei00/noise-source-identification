@@ -623,7 +623,8 @@ def evaluate(
     else:
         loader = make_loader(config, split, shuffle=False, class_names=class_names)
 
-    model = NoiseCNN(num_classes=len(class_names)).to(device)
+    auxiliary_enabled = bool(config.get("model", {}).get("auxiliary_heads", {}).get("enabled", False))
+    model = NoiseCNN(num_classes=len(class_names), auxiliary_heads=auxiliary_enabled).to(device)
     model.load_state_dict(checkpoint["model_state"])
     probs, targets = collect_probabilities(model, loader, device)
     metrics_by_threshold = [

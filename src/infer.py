@@ -58,7 +58,8 @@ def infer(model_path: str | Path, input_path: str | Path, device_name: str = "au
         magnitude_scale=str(stft_config.get("magnitude_scale", "log1p")),
     )
 
-    model = NoiseCNN(num_classes=len(class_names)).to(device)
+    auxiliary_enabled = bool(config.get("model", {}).get("auxiliary_heads", {}).get("enabled", False))
+    model = NoiseCNN(num_classes=len(class_names), auxiliary_heads=auxiliary_enabled).to(device)
     model.load_state_dict(checkpoint["model_state"])
     model.eval()
 

@@ -5,9 +5,9 @@ from torch import nn
 
 
 class NoiseCNN(nn.Module):
-    """Lightweight CNN for multi-label noise source classification."""
+    """CNN with optional structured auxiliary heads for source recognition."""
 
-    def __init__(self, num_classes: int):
+    def __init__(self, num_classes: int, auxiliary_heads: bool = False):
         super().__init__()
         if num_classes <= 0:
             raise ValueError(f"num_classes must be positive, got {num_classes}")
@@ -27,9 +27,29 @@ class NoiseCNN(nn.Module):
             nn.MaxPool2d(2),
             nn.AdaptiveAvgPool2d((1, 1)),
         )
+        self.num_classes = num_classes
+        self.auxiliary_heads = bool(auxiliary_heads)
         self.classifier = nn.Linear(64, num_classes)
+        if self.auxiliary_heads:
+            self.combo_classifier = nn.Linear(64, (2**num_classes) - 1)
+            self.count_classifier = nn.Linear(64, num_classes)
+
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.features(x)
+        return torch.flatten(x, 1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.features(x)
-        x = torch.flatten(x, 1)
-        return self.classifier(x)
+        return self.classifier(self.encode(x))
+
+    def forward_with_auxiliary(
+        self,
+        x: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if not self.auxiliary_heads:
+            raise RuntimeError("Auxiliary heads are not enabled for this model")
+        embedding = self.encode(x)
+        return (
+            self.classifier(embedding),
+            self.combo_classifier(embedding),
+            self.count_classifier(embedding),
+        )

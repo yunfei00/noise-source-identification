@@ -117,7 +117,8 @@ def load_model_for_inference(
     if not isinstance(config, dict):
         raise ValueError("Checkpoint is missing config")
 
-    model = NoiseCNN(num_classes=len(class_names)).to(device)
+    auxiliary_enabled = bool(config.get("model", {}).get("auxiliary_heads", {}).get("enabled", False))
+    model = NoiseCNN(num_classes=len(class_names), auxiliary_heads=auxiliary_enabled).to(device)
     model.load_state_dict(checkpoint["model_state"])
     model.eval()
     return model, class_names, config
