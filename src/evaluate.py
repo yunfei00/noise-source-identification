@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader
 
 from src.dataset import RealCsvDataset
 from src.infer import load_checkpoint
-from src.model_cnn import NoiseCNN
+from src.model_cnn import build_model
 from src.train import make_loader, prepare_real_split, resolve_device
 
 DEFAULT_THRESHOLDS = (0.3, 0.4, 0.5, 0.6, 0.7)
@@ -98,8 +98,15 @@ def collect_probabilities(
 
     with torch.no_grad():
         for x, y in loader:
-            logits = model(x.to(device))
-            all_probs.append(torch.sigmoid(logits).cpu().numpy())
+            x = x.to(device)
+            if bool(getattr(model, "auxiliary_heads", False)) and getattr(
+                model, "prediction_mode", "multilabel"
+            ) == "structured":
+                outputs = model.forward_with_auxiliary(x)
+                probabilities = model.probabilities_from_outputs(outputs)
+            else:
+                probabilities = torch.sigmoid(model(x))
+            all_probs.append(probabilities.cpu().numpy())
             all_targets.append(y.cpu().numpy())
 
     if not all_probs:
@@ -623,8 +630,7 @@ def evaluate(
     else:
         loader = make_loader(config, split, shuffle=False, class_names=class_names)
 
-    auxiliary_enabled = bool(config.get("model", {}).get("auxiliary_heads", {}).get("enabled", False))
-    model = NoiseCNN(num_classes=len(class_names), auxiliary_heads=auxiliary_enabled).to(device)
+    model = build_model(num_classes=len(class_names), config=config).to(device)
     model.load_state_dict(checkpoint["model_state"])
     probs, targets = collect_probabilities(model, loader, device)
     metrics_by_threshold = [

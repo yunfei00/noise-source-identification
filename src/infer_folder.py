@@ -12,9 +12,15 @@ import numpy as np
 import torch
 from sklearn.metrics import precision_recall_fscore_support
 
-from src.features import apply_signal_normalization, compute_stft_feature, fix_length, read_signal_csv
+from src.features import (
+    apply_signal_normalization,
+    compute_stft_feature,
+    fix_length,
+    prepare_stft_channels,
+    read_signal_csv,
+)
 from src.infer import load_checkpoint
-from src.model_cnn import NoiseCNN
+from src.model_cnn import NoiseCNN, build_model
 from src.train import resolve_device
 
 _SOURCE_NAME_RE = re.compile(r"source_\d+")
@@ -96,7 +102,7 @@ def _feature_from_csv(csv_path: Path, data_config: dict, stft_config: dict, prep
     signal = read_signal_csv(csv_path)
     signal = fix_length(signal, int(data_config.get("signal_length", 4096)))
     signal = apply_signal_normalization(signal, str(preprocessing_config.get("signal_normalization", "standardize")))
-    return compute_stft_feature(
+    feature = compute_stft_feature(
         signal,
         sample_rate=int(data_config.get("sample_rate", 1_000_000)),
         nperseg=int(stft_config.get("nperseg", 256)),
@@ -105,6 +111,7 @@ def _feature_from_csv(csv_path: Path, data_config: dict, stft_config: dict, prep
         target_time_bins=int(stft_config.get("target_time_bins", 64)),
         magnitude_scale=str(stft_config.get("magnitude_scale", "log1p")),
     )
+    return prepare_stft_channels(feature, str(stft_config.get("input_representation", "single")))
 
 
 def load_model_for_inference(
@@ -117,8 +124,7 @@ def load_model_for_inference(
     if not isinstance(config, dict):
         raise ValueError("Checkpoint is missing config")
 
-    auxiliary_enabled = bool(config.get("model", {}).get("auxiliary_heads", {}).get("enabled", False))
-    model = NoiseCNN(num_classes=len(class_names), auxiliary_heads=auxiliary_enabled).to(device)
+    model = build_model(num_classes=len(class_names), config=config).to(device)
     model.load_state_dict(checkpoint["model_state"])
     model.eval()
     return model, class_names, config
@@ -134,10 +140,13 @@ def infer_csv_probabilities(
     stft_config = config.get("stft", {})
     preprocessing_config = config.get("preprocessing", {})
     feature = _feature_from_csv(csv_path, data_config, stft_config, preprocessing_config)
-    x = torch.from_numpy(feature).unsqueeze(0).unsqueeze(0).float().to(device)
+    x = torch.from_numpy(feature).unsqueeze(0).float().to(device)
     with torch.no_grad():
-        logits = model(x)
-        probabilities = torch.sigmoid(logits).squeeze(0).cpu().numpy()
+        if model.auxiliary_heads and model.prediction_mode == "structured":
+            outputs = model.forward_with_auxiliary(x)
+            probabilities = model.probabilities_from_outputs(outputs).squeeze(0).cpu().numpy()
+        else:
+            probabilities = torch.sigmoid(model(x)).squeeze(0).cpu().numpy()
     return probabilities.astype(np.float32, copy=False)
 
 

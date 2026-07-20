@@ -25,6 +25,13 @@ The latest company-data test result was relayed manually because the dataset is 
 
 This changes the diagnosis: source_5 under-detection is the dominant problem. The old source_5 false-positive penalty and the forced `source_5 >= 0.60` threshold search constraint were too aggressive.
 
+Removing that constraint and using thresholds `0.55 / 0.55 / 0.50` produced the following test result with the legacy checkpoint:
+
+- micro F1: `0.7800`
+- exact match: `0.4781`
+- source_5 precision / recall / F1: `0.8307 / 0.6600 / 0.7360`
+- over-prediction / under-prediction: `0.2360 / 0.3990`
+
 ## Current Recommended Training Mode
 
 The current configuration is real-only training with absolute numeric features:
@@ -45,10 +52,14 @@ sampler:
 
 stft:
   magnitude_scale: absolute
+  input_representation: absolute_relative
 
 model:
+  architecture: residual
   auxiliary_heads:
     enabled: true
+  prediction:
+    mode: structured
 ```
 
 Important details:
@@ -96,6 +107,13 @@ Important details:
   - `stft.magnitude_scale: absolute`
   - training, evaluation, single-file inference, folder inference, and real-vs-synthetic analysis now use the same configurable feature path.
 
+- Structured-model update:
+  - residual spectral backbone with coarse frequency position preserved
+  - dual absolute/relative-log STFT channels for weak-source visibility
+  - seven-combination classification as the primary objective
+  - multilabel and source-count objectives as auxiliary supervision
+  - fused structured decoding that always returns one valid combination
+
 ## Current Known Risks
 
 - The 95% exact-match target has not been validated because full company data is not available in this environment.
@@ -131,22 +149,7 @@ python -m src.train --config configs/train.yaml
 
 python -m src.evaluate \
   --model outputs/checkpoints/best.pt \
-  --real-split test \
-  --threshold 0.5
-
-python -m src.search_thresholds \
-  --model outputs/checkpoints/best.pt \
-  --real-split val \
-  --metric exact_match \
-  --start 0.1 \
-  --end 0.95 \
-  --step 0.05 \
-  --output outputs/reports/threshold_search.csv
-
-python -m src.evaluate \
-  --model outputs/checkpoints/best.pt \
-  --real-split test \
-  --thresholds-json outputs/reports/best_thresholds.json
+  --real-split test
 ```
 
 ## Reports To Inspect First

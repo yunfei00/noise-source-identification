@@ -60,11 +60,23 @@ train:
   lr: 0.001
   device: auto
   num_workers: 0
+optimizer:
+  type: adamw
+  weight_decay: 0.0001
 model:
+  architecture: residual
+  base_channels: 32
+  dropout: 0.2
   auxiliary_heads:
     enabled: true
-    combo_loss_weight: 0.3
-    count_loss_weight: 0.2
+    multilabel_loss_weight: 0.3
+    combo_loss_weight: 1.0
+    count_loss_weight: 0.3
+  prediction:
+    mode: structured
+    combo_score_weight: 1.0
+    multilabel_score_weight: 0.3
+    count_score_weight: 0.2
 loss:
   type: asymmetric_bce
   use_pos_weight: false
@@ -95,6 +107,7 @@ stft:
   target_freq_bins: 128
   target_time_bins: 64
   magnitude_scale: absolute
+  input_representation: absolute_relative
 scheduler:
   enabled: true
   type: ReduceLROnPlateau

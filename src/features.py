@@ -260,3 +260,31 @@ def compute_stft_feature(
     magnitude = np.abs(zxx).astype(np.float32, copy=False)
     feature = scale_stft_magnitude(magnitude, magnitude_scale)
     return _pad_or_crop_2d(feature, target_freq_bins, target_time_bins)
+
+
+def prepare_stft_channels(
+    feature: np.ndarray,
+    representation: str = "single",
+) -> np.ndarray:
+    """Build model input channels from one absolute STFT magnitude feature.
+
+    ``absolute_relative`` keeps the original amplitude channel and adds an
+    energy-normalized log channel.  The latter exposes weak spectral structure
+    that can otherwise be dominated by a much stronger source in a mixture.
+    """
+    feature = np.asarray(feature, dtype=np.float32)
+    if feature.ndim != 2:
+        raise ValueError(f"Expected a 2D STFT feature, got shape {feature.shape}")
+    normalized_representation = str(representation).strip().lower()
+    if normalized_representation in {"single", "absolute", "legacy"}:
+        return feature[np.newaxis, ...].astype(np.float32, copy=False)
+    if normalized_representation != "absolute_relative":
+        raise ValueError(
+            f"Unsupported stft.input_representation: {representation}. "
+            "Use 'single' or 'absolute_relative'."
+        )
+
+    rms = float(np.sqrt(np.mean(np.square(feature, dtype=np.float64))))
+    scale = max(rms, 1e-12)
+    relative = np.log1p(feature / scale).astype(np.float32, copy=False)
+    return np.stack((feature, relative), axis=0).astype(np.float32, copy=False)

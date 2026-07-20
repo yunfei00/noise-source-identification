@@ -6,8 +6,14 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from src.features import apply_signal_normalization, compute_stft_feature, fix_length, read_signal_csv
-from src.model_cnn import NoiseCNN
+from src.features import (
+    apply_signal_normalization,
+    compute_stft_feature,
+    fix_length,
+    prepare_stft_channels,
+    read_signal_csv,
+)
+from src.model_cnn import build_model
 from src.train import resolve_device
 
 
@@ -57,16 +63,19 @@ def infer(model_path: str | Path, input_path: str | Path, device_name: str = "au
         target_time_bins=int(stft_config.get("target_time_bins", 64)),
         magnitude_scale=str(stft_config.get("magnitude_scale", "log1p")),
     )
+    feature = prepare_stft_channels(feature, str(stft_config.get("input_representation", "single")))
 
-    auxiliary_enabled = bool(config.get("model", {}).get("auxiliary_heads", {}).get("enabled", False))
-    model = NoiseCNN(num_classes=len(class_names), auxiliary_heads=auxiliary_enabled).to(device)
+    model = build_model(num_classes=len(class_names), config=config).to(device)
     model.load_state_dict(checkpoint["model_state"])
     model.eval()
 
-    x = torch.from_numpy(feature).unsqueeze(0).unsqueeze(0).float().to(device)
+    x = torch.from_numpy(feature).unsqueeze(0).float().to(device)
     with torch.no_grad():
-        logits = model(x)
-        probabilities = torch.sigmoid(logits).squeeze(0).cpu().numpy()
+        if model.auxiliary_heads and model.prediction_mode == "structured":
+            outputs = model.forward_with_auxiliary(x)
+            probabilities = model.probabilities_from_outputs(outputs).squeeze(0).cpu().numpy()
+        else:
+            probabilities = torch.sigmoid(model(x)).squeeze(0).cpu().numpy()
 
     results = [
         (class_name, float(probability), status_from_probability(float(probability)))

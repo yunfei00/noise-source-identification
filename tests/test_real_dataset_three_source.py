@@ -12,7 +12,7 @@ from torch import nn
 from src.build_real_index import build_real_index
 from src.dataset import parse_group_label
 from src.evaluate import compute_metrics
-from src.features import apply_signal_normalization, compute_stft_feature
+from src.features import apply_signal_normalization, compute_stft_feature, prepare_stft_channels
 from src.model_cnn import NoiseCNN
 from src.search_thresholds import threshold_values
 from src.split_real_dataset import split_rows
@@ -117,6 +117,16 @@ class ThreeSourceRealDatasetTest(unittest.TestCase):
         normalized = apply_signal_normalization(signal, "none")
         np.testing.assert_allclose(normalized, signal)
 
+    def test_absolute_relative_channels_keep_amplitude_and_scale_invariant_shape(self) -> None:
+        feature = np.asarray([[0.0, 1.0], [2.0, 4.0]], dtype=np.float32)
+
+        channels = prepare_stft_channels(feature, "absolute_relative")
+        scaled_channels = prepare_stft_channels(feature * 10.0, "absolute_relative")
+
+        self.assertEqual(channels.shape, (2, 2, 2))
+        np.testing.assert_allclose(channels[0], feature)
+        np.testing.assert_allclose(channels[1], scaled_channels[1], rtol=1e-6, atol=1e-6)
+
     def test_auxiliary_heads_produce_multilabel_combo_and_count_logits(self) -> None:
         model = NoiseCNN(num_classes=3, auxiliary_heads=True)
         logits, combo_logits, count_logits = model.forward_with_auxiliary(
@@ -145,7 +155,12 @@ class ThreeSourceRealDatasetTest(unittest.TestCase):
             torch.zeros(7, 7, requires_grad=True),
             torch.zeros(7, 3, requires_grad=True),
         )
-        criterion = MultiTaskLoss(nn.BCEWithLogitsLoss(), combo_weight=0.3, count_weight=0.2)
+        criterion = MultiTaskLoss(
+            nn.BCEWithLogitsLoss(),
+            multilabel_weight=0.3,
+            combo_weight=1.0,
+            count_weight=0.3,
+        )
 
         loss = criterion(outputs, targets)
         loss.backward()
@@ -169,6 +184,35 @@ class ThreeSourceRealDatasetTest(unittest.TestCase):
         )
 
         self.assertGreater(float(penalized(logits, targets)), float(baseline(logits, targets)))
+
+    def test_residual_model_preserves_expected_output_shapes(self) -> None:
+        model = NoiseCNN(
+            num_classes=3,
+            auxiliary_heads=True,
+            architecture="residual",
+            base_channels=8,
+            dropout=0.1,
+            prediction_mode="structured",
+        )
+
+        outputs = model.forward_with_auxiliary(torch.randn(2, 1, 128, 64))
+
+        self.assertEqual(tuple(outputs[0].shape), (2, 3))
+        self.assertEqual(tuple(outputs[1].shape), (2, 7))
+        self.assertEqual(tuple(outputs[2].shape), (2, 3))
+
+    def test_structured_decoder_returns_one_valid_combination(self) -> None:
+        model = NoiseCNN(num_classes=3, auxiliary_heads=True, prediction_mode="structured")
+        multilabel_logits = torch.zeros(1, 3)
+        combo_logits = torch.full((1, 7), -10.0)
+        combo_logits[0, 5] = 10.0  # Binary value 110 maps to class index 5.
+        count_logits = torch.tensor([[-10.0, 10.0, -10.0]])
+
+        prediction = model.probabilities_from_outputs(
+            (multilabel_logits, combo_logits, count_logits)
+        )
+
+        self.assertEqual(prediction.int().tolist(), [[1, 1, 0]])
 
 
 if __name__ == "__main__":

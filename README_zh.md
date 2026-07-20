@@ -127,36 +127,15 @@ python -m src.analyze_label_distribution \
 python -m src.train --config configs/train.yaml
 ```
 
-统一阈值评估：
+评估结构化组合模型：
 
 ```bash
 python -m src.evaluate \
   --model outputs/checkpoints/best.pt \
-  --real-split test \
-  --threshold 0.5
+  --real-split test
 ```
 
-per-class 阈值搜索：
-
-```bash
-python -m src.search_thresholds \
-  --model outputs/checkpoints/best.pt \
-  --real-split val \
-  --metric exact_match \
-  --start 0.1 \
-  --end 0.95 \
-  --step 0.05 \
-  --output outputs/reports/threshold_search.csv
-```
-
-使用最佳阈值重新评估：
-
-```bash
-python -m src.evaluate \
-  --model outputs/checkpoints/best.pt \
-  --real-split test \
-  --thresholds-json outputs/reports/best_thresholds.json
-```
+当前推荐模型直接从七种有效噪声源组合中选择一种，因此不再搜索三个独立阈值。`src.search_thresholds` 仅保留给旧的 `multilabel` 检查点使用。
 
 ## CSV 批量转图片查看数据
 

@@ -22,7 +22,7 @@ from tqdm.auto import tqdm
 from src.build_real_index import build_real_index, discover_class_names
 from src.create_balanced_split import create_balanced_split
 from src.dataset import RealCsvDataset, SyntheticNpyDataset
-from src.model_cnn import NoiseCNN
+from src.model_cnn import build_model
 from src.split_real_dataset import split_real_dataset
 
 DEFAULT_CLASS_NAMES = ["source_1", "source_3", "source_5"]
@@ -249,11 +249,18 @@ class MultiTaskLoss(nn.Module):
 
     uses_auxiliary_outputs = True
 
-    def __init__(self, multilabel_loss: nn.Module, combo_weight: float, count_weight: float) -> None:
+    def __init__(
+        self,
+        multilabel_loss: nn.Module,
+        multilabel_weight: float,
+        combo_weight: float,
+        count_weight: float,
+    ) -> None:
         super().__init__()
-        if combo_weight < 0.0 or count_weight < 0.0:
+        if multilabel_weight < 0.0 or combo_weight < 0.0 or count_weight < 0.0:
             raise ValueError("Auxiliary loss weights must be non-negative")
         self.multilabel_loss = multilabel_loss
+        self.multilabel_weight = float(multilabel_weight)
         self.combo_weight = float(combo_weight)
         self.count_weight = float(count_weight)
 
@@ -278,7 +285,7 @@ class MultiTaskLoss(nn.Module):
         combo_targets = (binary_targets * bit_weights.view(1, -1)).sum(dim=1) - 1
         count_targets = source_counts - 1
         return (
-            self.multilabel_loss(logits, targets)
+            self.multilabel_weight * self.multilabel_loss(logits, targets)
             + self.combo_weight * F.cross_entropy(combo_logits, combo_targets)
             + self.count_weight * F.cross_entropy(count_logits, count_targets)
         )
@@ -348,8 +355,9 @@ def build_criterion(config: dict, train_labels: np.ndarray, class_names: list[st
     if bool(auxiliary_config.get("enabled", False)):
         criterion = MultiTaskLoss(
             criterion,
-            combo_weight=float(auxiliary_config.get("combo_loss_weight", 0.3)),
-            count_weight=float(auxiliary_config.get("count_loss_weight", 0.2)),
+            multilabel_weight=float(auxiliary_config.get("multilabel_loss_weight", 0.3)),
+            combo_weight=float(auxiliary_config.get("combo_loss_weight", 1.0)),
+            count_weight=float(auxiliary_config.get("count_loss_weight", 0.3)),
         )
     return criterion
 
@@ -664,9 +672,11 @@ def run_epoch(
                 outputs = model.forward_with_auxiliary(x)
                 logits = outputs[0]
                 loss = criterion(outputs, y)
+                batch_probs = model.probabilities_from_outputs(outputs)
             else:
                 logits = model(x)
                 loss = criterion(logits, y)
+                batch_probs = torch.sigmoid(logits)
 
             if optimizer is not None:
                 optimizer.zero_grad(set_to_none=True)
@@ -676,7 +686,7 @@ def run_epoch(
             batch_size = x.shape[0]
             total_loss += float(loss.item()) * batch_size
             total_items += batch_size
-            all_probs.append(torch.sigmoid(logits).detach().cpu().numpy())
+            all_probs.append(batch_probs.detach().cpu().numpy())
             all_targets.append(y.detach().cpu().numpy())
             batches.set_postfix(loss=f"{total_loss / total_items:.4f}")
 
@@ -810,6 +820,7 @@ def train(config: dict) -> None:
     train_config = config.get("train", {})
     early_stopping_config = config.get("early_stopping", {})
     scheduler_config = config.get("scheduler", {})
+    optimizer_config = config.get("optimizer", {})
     paths_config = config.get("paths", {})
     sampler_enabled, sampler_strategy = sampler_settings(config)
 
@@ -854,11 +865,20 @@ def train(config: dict) -> None:
         pin_memory=torch.cuda.is_available(),
     )
 
-    auxiliary_enabled = bool(config.get("model", {}).get("auxiliary_heads", {}).get("enabled", False))
-    model = NoiseCNN(num_classes=len(class_names), auxiliary_heads=auxiliary_enabled).to(device)
+    model = build_model(num_classes=len(class_names), config=config).to(device)
     train_labels = _dataset_labels(train_dataset)
     criterion = build_criterion(config, train_labels, class_names, device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=float(train_config.get("lr", 1e-3)))
+    optimizer_type = str(optimizer_config.get("type", "adam")).strip().lower()
+    optimizer_kwargs = {
+        "lr": float(train_config.get("lr", 1e-3)),
+        "weight_decay": float(optimizer_config.get("weight_decay", 0.0)),
+    }
+    if optimizer_type == "adam":
+        optimizer = torch.optim.Adam(model.parameters(), **optimizer_kwargs)
+    elif optimizer_type == "adamw":
+        optimizer = torch.optim.AdamW(model.parameters(), **optimizer_kwargs)
+    else:
+        raise ValueError(f"Unsupported optimizer.type: {optimizer_type}")
     threshold = float(train_config.get("threshold", 0.5))
     epochs = int(train_config.get("epochs", 200))
 
@@ -917,6 +937,8 @@ def train(config: dict) -> None:
     print(f"combo_samples={combo_samples}")
     print(f"batch_size={int(train_config.get('batch_size', 32))}")
     print(f"epochs={epochs}")
+    print(f"optimizer.type={optimizer_type}")
+    print(f"optimizer.weight_decay={optimizer_kwargs['weight_decay']}")
     print(f"sampler.enabled={sampler_enabled}")
     print(f"sampler.strategy={sampler_strategy}")
     print(f"preprocessing.signal_normalization={preprocessing_config.get('signal_normalization', 'standardize')}")

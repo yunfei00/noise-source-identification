@@ -10,7 +10,13 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from src.features import apply_signal_normalization, compute_stft_feature, fix_length, read_signal_csv
+from src.features import (
+    apply_signal_normalization,
+    compute_stft_feature,
+    fix_length,
+    prepare_stft_channels,
+    read_signal_csv,
+)
 
 _SOURCE_NAME_RE = re.compile(r"source_\d+")
 _UNKNOWN_GROUP_PREFIXES = ("unknown", "background")
@@ -82,6 +88,7 @@ class SyntheticNpyDataset(Dataset):
         self.target_freq_bins = int(stft_config.get("target_freq_bins", 128))
         self.target_time_bins = int(stft_config.get("target_time_bins", 64))
         self.magnitude_scale = str(stft_config.get("magnitude_scale", "log1p"))
+        self.input_representation = str(stft_config.get("input_representation", "single"))
         self.signal_normalization = str(config.get("preprocessing", {}).get("signal_normalization", "standardize"))
 
     def __len__(self) -> int:
@@ -102,7 +109,7 @@ class SyntheticNpyDataset(Dataset):
             target_time_bins=self.target_time_bins,
             magnitude_scale=self.magnitude_scale,
         )
-        x = torch.from_numpy(feature).unsqueeze(0).float()
+        x = torch.from_numpy(prepare_stft_channels(feature, self.input_representation)).float()
         y = torch.from_numpy(label).float()
         return x, y
 
@@ -207,7 +214,7 @@ class RealCsvDataset(SyntheticNpyDataset):
         sample = self.samples[index]
         label = np.asarray(sample["label"], dtype=np.float32)
         feature = self._load_or_compute_feature(Path(sample["path"]), str(sample["file"]))
-        x = torch.from_numpy(feature).unsqueeze(0).float()
+        x = torch.from_numpy(feature).float()
         y = torch.from_numpy(label).float()
         return x, y
 
@@ -220,6 +227,7 @@ class RealCsvDataset(SyntheticNpyDataset):
             "target_freq_bins": self.target_freq_bins,
             "target_time_bins": self.target_time_bins,
             "magnitude_scale": self.magnitude_scale,
+            "input_representation": self.input_representation,
             "signal_normalization": self.signal_normalization,
         }
         return hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:12]
@@ -246,6 +254,7 @@ class RealCsvDataset(SyntheticNpyDataset):
             target_time_bins=self.target_time_bins,
             magnitude_scale=self.magnitude_scale,
         )
+        feature = prepare_stft_channels(feature, self.input_representation)
 
         if self.cache_enabled:
             cache_path = self._cache_path(relative_file)

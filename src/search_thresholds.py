@@ -11,7 +11,7 @@ import torch
 
 from src.evaluate import collect_probabilities, compute_metrics, compute_group_accuracy, predictions_at_threshold, thresholds_for_report, _real_loader_and_groups
 from src.infer import load_checkpoint
-from src.model_cnn import NoiseCNN
+from src.model_cnn import build_model
 from src.train import make_loader, resolve_device
 
 METRIC_KEYS = ("exact_match", "micro_f1", "macro_f1", "sample_f1")
@@ -53,9 +53,13 @@ def _load_probs_and_targets(
         loader = make_loader(config, split, shuffle=False, class_names=class_names)
         eval_split = split
 
-    auxiliary_enabled = bool(config.get("model", {}).get("auxiliary_heads", {}).get("enabled", False))
-    model = NoiseCNN(num_classes=len(class_names), auxiliary_heads=auxiliary_enabled).to(device)
+    model = build_model(num_classes=len(class_names), config=config).to(device)
     model.load_state_dict(checkpoint["model_state"])
+    if getattr(model, "prediction_mode", "multilabel") == "structured":
+        raise ValueError(
+            "This checkpoint uses structured combination decoding, so per-source threshold search is not needed. "
+            "Evaluate it directly with src.evaluate."
+        )
     probs, targets = collect_probabilities(model, loader, device)
     return probs, targets, class_names, eval_split, locals().get("groups")
 

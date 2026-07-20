@@ -112,38 +112,17 @@ python -m src.split_real_dataset \
 python -m src.train --config configs/train.yaml
 ```
 
-### Step 5: Evaluate with one global threshold
+### Step 5: Evaluate the structured combination model
 
 ```bash
 python -m src.evaluate \
   --model outputs/checkpoints/best.pt \
-  --real-split test \
-  --threshold 0.5
+  --real-split test
 ```
 
-### Step 6: Search per-class thresholds after training
+The recommended model decodes one of the seven valid source combinations directly, so per-source threshold search is not used. `src.search_thresholds` remains available for legacy checkpoints whose prediction mode is `multilabel`.
 
-```bash
-python -m src.search_thresholds \
-  --model outputs/checkpoints/best.pt \
-  --real-split val \
-  --metric exact_match \
-  --start 0.1 \
-  --end 0.95 \
-  --step 0.05 \
-  --output outputs/reports/threshold_search.csv
-```
-
-### Step 7: Re-evaluate with `best_thresholds.json`
-
-```bash
-python -m src.evaluate \
-  --model outputs/checkpoints/best.pt \
-  --real-split test \
-  --thresholds-json outputs/reports/best_thresholds.json
-```
-
-### Step 8: Diagnose source5 over-prediction
+### Step 6: Diagnose source5 errors
 
 ```bash
 python -m src.feature_statistics \
