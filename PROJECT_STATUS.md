@@ -32,6 +32,8 @@ Removing that constraint and using thresholds `0.55 / 0.55 / 0.50` produced the 
 - source_5 precision / recall / F1: `0.8307 / 0.6600 / 0.7360`
 - over-prediction / under-prediction: `0.2360 / 0.3990`
 
+The structured residual checkpoint later reached approximately `0.906` exact match on the training split but only about `0.60` on validation/test. Per-label training accuracy was `0.9774 / 0.9654 / 0.9503 / 0.8292 / 0.8766 / 0.8137 / 0.9920`, confirming a severe generalization gap rather than a pure capacity limit.
+
 ## Current Recommended Training Mode
 
 The current configuration is real-only training with absolute numeric features:
@@ -113,6 +115,8 @@ Important details:
   - seven-combination classification as the primary objective
   - multilabel and source-count objectives as auxiliary supervision
   - fused structured decoding that always returns one valid combination
+  - real-only spectrum augmentation to reduce the observed train/test gap
+  - combination/count label smoothing, stronger dropout, and AdamW weight decay
 
 - Physics-guided template ensemble:
   - robust single-source power-spectrum templates

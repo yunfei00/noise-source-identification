@@ -255,6 +255,8 @@ class MultiTaskLoss(nn.Module):
         multilabel_weight: float,
         combo_weight: float,
         count_weight: float,
+        combo_label_smoothing: float = 0.0,
+        count_label_smoothing: float = 0.0,
     ) -> None:
         super().__init__()
         if multilabel_weight < 0.0 or combo_weight < 0.0 or count_weight < 0.0:
@@ -263,6 +265,8 @@ class MultiTaskLoss(nn.Module):
         self.multilabel_weight = float(multilabel_weight)
         self.combo_weight = float(combo_weight)
         self.count_weight = float(count_weight)
+        self.combo_label_smoothing = float(combo_label_smoothing)
+        self.count_label_smoothing = float(count_label_smoothing)
 
     def forward(
         self,
@@ -286,8 +290,18 @@ class MultiTaskLoss(nn.Module):
         count_targets = source_counts - 1
         return (
             self.multilabel_weight * self.multilabel_loss(logits, targets)
-            + self.combo_weight * F.cross_entropy(combo_logits, combo_targets)
-            + self.count_weight * F.cross_entropy(count_logits, count_targets)
+            + self.combo_weight
+            * F.cross_entropy(
+                combo_logits,
+                combo_targets,
+                label_smoothing=self.combo_label_smoothing,
+            )
+            + self.count_weight
+            * F.cross_entropy(
+                count_logits,
+                count_targets,
+                label_smoothing=self.count_label_smoothing,
+            )
         )
 
 
@@ -358,6 +372,8 @@ def build_criterion(config: dict, train_labels: np.ndarray, class_names: list[st
             multilabel_weight=float(auxiliary_config.get("multilabel_loss_weight", 0.3)),
             combo_weight=float(auxiliary_config.get("combo_loss_weight", 1.0)),
             count_weight=float(auxiliary_config.get("count_loss_weight", 0.3)),
+            combo_label_smoothing=float(auxiliary_config.get("combo_label_smoothing", 0.05)),
+            count_label_smoothing=float(auxiliary_config.get("count_label_smoothing", 0.03)),
         )
     return criterion
 
@@ -514,7 +530,14 @@ def _try_real_dataset(
     data_config = config.get("data", {})
     real_dir = real_data_config.get("dataset_root", ".")
     try:
-        return RealCsvDataset(real_dir, class_names, config, split=split if split_path else None, index_path=split_path)
+        return RealCsvDataset(
+            real_dir,
+            class_names,
+            config,
+            split=split if split_path else None,
+            index_path=split_path,
+            augment=split == "train",
+        )
     except (FileNotFoundError, ValueError) as exc:
         print(f"warning: real {split} dataset unavailable: {exc}")
         return None

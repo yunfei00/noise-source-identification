@@ -10,7 +10,7 @@ import torch
 from torch import nn
 
 from src.build_real_index import build_real_index
-from src.dataset import parse_group_label
+from src.dataset import augment_real_stft_feature, parse_group_label
 from src.evaluate import compute_metrics, compute_ratio_accuracy
 from src.features import apply_signal_normalization, compute_stft_feature, prepare_stft_channels
 from src.model_cnn import NoiseCNN
@@ -145,6 +145,33 @@ class ThreeSourceRealDatasetTest(unittest.TestCase):
         self.assertEqual(channels.shape, (2, 2, 2))
         np.testing.assert_allclose(channels[0], feature)
         np.testing.assert_allclose(channels[1], scaled_channels[1], rtol=1e-6, atol=1e-6)
+
+    def test_real_stft_augmentation_preserves_shape_and_input(self) -> None:
+        absolute = np.linspace(0.0, 1.0, 32, dtype=np.float32).reshape(8, 4)
+        feature = prepare_stft_channels(absolute, "absolute_relative")
+        original = feature.copy()
+        config = {
+            "gain_range": [0.8, 1.2],
+            "noise_snr_db_range": [30, 40],
+            "frequency_shift_bins": 1,
+            "time_shift_bins": 1,
+            "frequency_mask_probability": 1.0,
+            "frequency_mask_width": 2,
+            "time_mask_probability": 1.0,
+            "time_mask_width": 1,
+        }
+
+        augmented = augment_real_stft_feature(
+            feature,
+            "absolute_relative",
+            config,
+            np.random.default_rng(42),
+        )
+
+        self.assertEqual(augmented.shape, feature.shape)
+        self.assertTrue(np.all(augmented >= 0.0))
+        np.testing.assert_array_equal(feature, original)
+        self.assertFalse(np.array_equal(augmented, original))
 
     def test_auxiliary_heads_produce_multilabel_combo_and_count_logits(self) -> None:
         model = NoiseCNN(num_classes=3, auxiliary_heads=True)

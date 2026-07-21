@@ -112,6 +112,8 @@ python -m src.split_real_dataset \
 python -m src.train --config configs/train.yaml
 ```
 
+For `real_only` training, moderate gain/noise, frequency/time shifts, and small spectrum masks are applied only to the training split. Validation and test features remain unchanged.
+
 ### Step 5: Evaluate the structured combination model
 
 ```bash

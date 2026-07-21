@@ -129,6 +129,8 @@ python -m src.analyze_label_distribution \
 python -m src.train --config configs/train.yaml
 ```
 
+在 `real_only` 模式下，适度的增益/噪声、频率/时间平移和小范围频谱遮挡只应用于训练集；验证集和测试集保持原始特征不变。
+
 评估结构化组合模型：
 
 ```bash

@@ -22,6 +22,72 @@ _SOURCE_NAME_RE = re.compile(r"source_\d+")
 _UNKNOWN_GROUP_PREFIXES = ("unknown", "background")
 
 
+def _augmentation_pair(config: dict, key: str, default: tuple[float, float]) -> tuple[float, float]:
+    value = config.get(key, default)
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise ValueError(f"augmentation.real.{key} must contain exactly two values")
+    low, high = float(value[0]), float(value[1])
+    if low > high:
+        raise ValueError(f"augmentation.real.{key} low value must be <= high value")
+    return low, high
+
+
+def augment_real_stft_feature(
+    feature: np.ndarray,
+    input_representation: str,
+    config: dict,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """Apply moderate spectrum-domain augmentation to a real training sample."""
+    feature = np.asarray(feature, dtype=np.float32)
+    if feature.ndim != 3 or feature.shape[0] < 1:
+        raise ValueError(f"Expected [channels,freq,time] feature, got {feature.shape}")
+    absolute = feature[0].copy()
+
+    gain_low, gain_high = _augmentation_pair(config, "gain_range", (0.7, 1.4))
+    absolute *= float(rng.uniform(gain_low, gain_high))
+
+    snr_low, snr_high = _augmentation_pair(config, "noise_snr_db_range", (25.0, 45.0))
+    signal_power = float(np.mean(np.square(absolute, dtype=np.float64)))
+    if signal_power > 1e-20:
+        snr_db = float(rng.uniform(snr_low, snr_high))
+        noise_std = np.sqrt(signal_power / (10.0 ** (snr_db / 10.0)))
+        absolute += rng.normal(0.0, noise_std, size=absolute.shape).astype(np.float32)
+        np.maximum(absolute, 0.0, out=absolute)
+
+    channels = prepare_stft_channels(absolute, input_representation)
+    max_frequency_shift = max(0, int(config.get("frequency_shift_bins", 2)))
+    if max_frequency_shift:
+        shift = int(rng.integers(-max_frequency_shift, max_frequency_shift + 1))
+        if shift:
+            shifted = np.zeros_like(channels)
+            if shift > 0:
+                shifted[:, shift:, :] = channels[:, :-shift, :]
+            else:
+                shifted[:, :shift, :] = channels[:, -shift:, :]
+            channels = shifted
+
+    max_time_shift = max(0, int(config.get("time_shift_bins", 8)))
+    if max_time_shift:
+        time_shift = int(rng.integers(-max_time_shift, max_time_shift + 1))
+        channels = np.roll(channels, time_shift, axis=2)
+
+    frequency_mask_probability = float(config.get("frequency_mask_probability", 0.3))
+    frequency_mask_width = min(max(0, int(config.get("frequency_mask_width", 4))), channels.shape[1])
+    if frequency_mask_width and rng.random() < frequency_mask_probability:
+        width = int(rng.integers(1, frequency_mask_width + 1))
+        start = int(rng.integers(0, channels.shape[1] - width + 1))
+        channels[:, start : start + width, :] = 0.0
+
+    time_mask_probability = float(config.get("time_mask_probability", 0.3))
+    time_mask_width = min(max(0, int(config.get("time_mask_width", 6))), channels.shape[2])
+    if time_mask_width and rng.random() < time_mask_probability:
+        width = int(rng.integers(1, time_mask_width + 1))
+        start = int(rng.integers(0, channels.shape[2] - width + 1))
+        channels[:, :, start : start + width] = 0.0
+    return channels.astype(np.float32, copy=False)
+
+
 def is_unknown_group(group: str) -> bool:
     return group.startswith(_UNKNOWN_GROUP_PREFIXES)
 
@@ -127,6 +193,7 @@ class RealCsvDataset(SyntheticNpyDataset):
         config: dict,
         split: str | None = None,
         index_path: str | Path | None = None,
+        augment: bool = False,
     ):
         self.root = Path(real_dir)
         if not self.root.exists():
@@ -134,7 +201,9 @@ class RealCsvDataset(SyntheticNpyDataset):
         if not self.root.is_dir():
             raise ValueError(f"real dataset root must be a directory: {self.root}")
         self.class_names = class_names
+        self.augment = bool(augment)
         self._configure_features(config)
+        self.real_augmentation_config = config.get("augmentation", {}).get("real", {})
         self.cache_config = config.get("cache", {})
         self.cache_enabled = bool(self.cache_config.get("enabled", False))
         self.cache_dir = Path(self.cache_config.get("dir", "data/cache_stft"))
@@ -214,6 +283,14 @@ class RealCsvDataset(SyntheticNpyDataset):
         sample = self.samples[index]
         label = np.asarray(sample["label"], dtype=np.float32)
         feature = self._load_or_compute_feature(Path(sample["path"]), str(sample["file"]))
+        if self.augment and bool(self.real_augmentation_config.get("enabled", False)):
+            seed = int(np.random.randint(0, np.iinfo(np.uint32).max, dtype=np.uint32))
+            feature = augment_real_stft_feature(
+                feature,
+                self.input_representation,
+                self.real_augmentation_config,
+                np.random.default_rng(seed),
+            )
         x = torch.from_numpy(feature).float()
         y = torch.from_numpy(label).float()
         return x, y
