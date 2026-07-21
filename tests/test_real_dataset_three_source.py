@@ -16,6 +16,12 @@ from src.features import apply_signal_normalization, compute_stft_feature, prepa
 from src.model_cnn import NoiseCNN
 from src.search_thresholds import threshold_values
 from src.split_real_dataset import split_rows
+from src.template_ensemble import (
+    combo_label_matrix,
+    labels_to_combo_indices,
+    nnls_features,
+    search_blend_weight,
+)
 from src.train import AsymmetricBCEWithLogitsLoss, MultiTaskLoss
 
 
@@ -226,6 +232,41 @@ class ThreeSourceRealDatasetTest(unittest.TestCase):
         )
 
         self.assertEqual(prediction.int().tolist(), [[1, 1, 0]])
+
+    def test_nnls_features_recover_dominant_template_coefficients(self) -> None:
+        templates = np.asarray(
+            [
+                [0.7, 0.2, 0.1, 0.0],
+                [0.0, 0.1, 0.2, 0.7],
+                [0.1, 0.2, 0.6, 0.1],
+            ],
+            dtype=float,
+        )
+        power = 0.8 * templates[0] + 0.2 * templates[2]
+
+        features = nnls_features(power, templates)
+
+        self.assertGreater(features[0], features[2])
+        self.assertLess(features[1], 1e-5)
+
+    def test_combo_indices_follow_binary_label_order(self) -> None:
+        labels = combo_label_matrix(3)
+
+        indices = labels_to_combo_indices(labels)
+
+        np.testing.assert_array_equal(indices, np.arange(7))
+
+    def test_blend_search_can_select_template_model(self) -> None:
+        targets = np.asarray([0, 1, 2], dtype=np.int64)
+        neural = np.full((3, 7), 0.01)
+        neural[:, 6] = 0.94
+        template = np.full((3, 7), 0.01)
+        template[np.arange(3), targets] = 0.94
+
+        alpha, accuracy = search_blend_weight(targets, neural, template, step=0.25)
+
+        self.assertGreaterEqual(alpha, 0.5)
+        self.assertEqual(accuracy, 1.0)
 
 
 if __name__ == "__main__":

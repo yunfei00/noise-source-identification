@@ -156,6 +156,14 @@ class NoiseCNN(nn.Module):
         self,
         outputs: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
     ) -> torch.Tensor:
+        scores = self.structured_scores(outputs)
+        labels = self.combo_labels.to(device=scores.device, dtype=scores.dtype)
+        return labels[scores.argmax(dim=1)]
+
+    def structured_scores(
+        self,
+        outputs: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    ) -> torch.Tensor:
         if not self.auxiliary_heads:
             raise RuntimeError("Structured prediction requires auxiliary heads")
         multilabel_logits, combo_logits, count_logits = outputs
@@ -172,12 +180,17 @@ class NoiseCNN(nn.Module):
         count_indices = labels.sum(dim=1).long() - 1
         count_scores = count_log_probs[:, count_indices]
 
-        scores = (
+        return (
             self.combo_score_weight * combo_scores
             + self.multilabel_score_weight * multilabel_scores
             + self.count_score_weight * count_scores
         )
-        return labels[scores.argmax(dim=1)]
+
+    def structured_combo_probabilities(
+        self,
+        outputs: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    ) -> torch.Tensor:
+        return F.softmax(self.structured_scores(outputs), dim=1)
 
 
 def build_model(num_classes: int, config: dict) -> NoiseCNN:

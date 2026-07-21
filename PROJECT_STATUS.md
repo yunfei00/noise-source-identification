@@ -114,6 +114,12 @@ Important details:
   - multilabel and source-count objectives as auxiliary supervision
   - fused structured decoding that always returns one valid combination
 
+- Physics-guided template ensemble:
+  - robust single-source power-spectrum templates
+  - non-negative least-squares source coefficients
+  - seven-combination calibration from NNLS features
+  - validation-selected fusion with structured CNN probabilities
+
 ## Current Known Risks
 
 - The 95% exact-match target has not been validated because full company data is not available in this environment.

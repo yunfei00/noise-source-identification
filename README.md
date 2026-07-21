@@ -122,7 +122,17 @@ python -m src.evaluate \
 
 The recommended model decodes one of the seven valid source combinations directly, so per-source threshold search is not used. `src.search_thresholds` remains available for legacy checkpoints whose prediction mode is `multilabel`.
 
-### Step 6: Diagnose source5 errors
+### Step 6: Evaluate the physics-guided spectral-template ensemble
+
+```bash
+python -m src.template_ensemble \
+  --model outputs/checkpoints/best.pt \
+  --output outputs/reports/template_ensemble_report.json
+```
+
+This builds robust single-source power-spectrum templates from the training split, fits non-negative template coefficients, calibrates the seven combinations, and searches the CNN/template blend weight on validation data. It reports separate neural, NNLS-template, and ensemble test metrics without retraining the CNN.
+
+### Step 7: Diagnose source5 errors
 
 ```bash
 python -m src.feature_statistics \

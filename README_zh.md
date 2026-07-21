@@ -139,6 +139,16 @@ python -m src.evaluate \
 
 当前推荐模型直接从七种有效噪声源组合中选择一种，因此不再搜索三个独立阈值。`src.search_thresholds` 仅保留给旧的 `multilabel` 检查点使用。
 
+物理频谱模板与神经网络融合评估：
+
+```bash
+python -m src.template_ensemble \
+  --model outputs/checkpoints/best.pt \
+  --output outputs/reports/template_ensemble_report.json
+```
+
+该命令从训练集单源数据建立稳健功率谱模板，执行非负模板系数分解，校准七种组合，并在验证集搜索 CNN/模板融合权重。无需重新训练 CNN，报告会分别给出神经网络、NNLS 模板和融合模型的测试指标。
+
 ## CSV 批量转图片查看数据
 
 把输入目录下所有 CSV 时域数据递归转换成 PNG，输出目录结构和输入目录结构一致，只把 `.csv` 改成 `.png`。
