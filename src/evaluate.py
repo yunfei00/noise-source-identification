@@ -448,9 +448,12 @@ def _real_loader_and_groups(config: dict, class_names: list[str], real_split: st
         num_workers=int(config.get("train", {}).get("num_workers", 0)),
         pin_memory=torch.cuda.is_available(),
     )
-    groups = [str(sample["group"]) for sample in dataset.samples]
-    condition_paths = [str(sample.get("condition_path", "")) for sample in dataset.samples]
     files = [str(sample.get("file", "")) for sample in dataset.samples]
+    groups = [str(sample["group"]) for sample in dataset.samples]
+    condition_paths = [
+        str(sample.get("condition_path", "")).strip() or file_path
+        for sample, file_path in zip(dataset.samples, files)
+    ]
     return loader, groups, condition_paths, files
 
 

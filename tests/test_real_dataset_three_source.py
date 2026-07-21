@@ -11,7 +11,7 @@ from torch import nn
 
 from src.build_real_index import build_real_index
 from src.dataset import parse_group_label
-from src.evaluate import compute_metrics
+from src.evaluate import compute_metrics, compute_ratio_accuracy
 from src.features import apply_signal_normalization, compute_stft_feature, prepare_stft_channels
 from src.model_cnn import NoiseCNN
 from src.search_thresholds import threshold_values
@@ -84,6 +84,19 @@ class ThreeSourceRealDatasetTest(unittest.TestCase):
         self.assertEqual(metrics["overall"]["exact_match"], 0.5)
         self.assertEqual(metrics["overall"]["over_prediction_rate"], 0.5)
         self.assertEqual(metrics["overall"]["under_prediction_rate"], 0.0)
+
+    def test_ratio_accuracy_can_extract_ratio_from_full_file_paths(self) -> None:
+        targets = np.asarray([[1, 1, 1], [1, 1, 1]], dtype=int)
+        preds = np.asarray([[1, 1, 1], [1, 1, 0]], dtype=int)
+        paths = [
+            "data/real_dataset/source_1_source_3_source_5_mix/ratio_1_2_4/a.csv",
+            "data/real_dataset/source_1_source_3_source_5_mix/ratio_1_2_4/b.csv",
+        ]
+
+        result = compute_ratio_accuracy(preds, targets, paths)
+
+        self.assertEqual(result["ratio_1_2_4"]["num_samples"], 2)
+        self.assertEqual(result["ratio_1_2_4"]["exact_match_accuracy"], 0.5)
 
     def test_threshold_values_are_inclusive(self) -> None:
         self.assertEqual(threshold_values(0.3, 0.4, 0.05), [0.3, 0.35, 0.4])
