@@ -89,8 +89,8 @@ class ThreeSourceRealDatasetTest(unittest.TestCase):
         targets = np.asarray([[1, 1, 1], [1, 1, 1]], dtype=int)
         preds = np.asarray([[1, 1, 1], [1, 1, 0]], dtype=int)
         paths = [
-            "data/real_dataset/source_1_source_3_source_5_mix/ratio_1_2_4/a.csv",
-            "data/real_dataset/source_1_source_3_source_5_mix/ratio_1_2_4/b.csv",
+            "data/real_dataset/source_1_source_3_source_5_mix/radio_1_2_4/a.csv",
+            "data/real_dataset/source_1_source_3_source_5_mix/radio_1_2_4/b.csv",
         ]
 
         result = compute_ratio_accuracy(preds, targets, paths)

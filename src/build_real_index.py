@@ -182,11 +182,13 @@ def _ratio_from_condition(condition_path: str) -> str | None:
     for part in Path(condition_path).parts:
         if part.startswith("ratio_"):
             return part
+        if part.startswith("radio_"):
+            return "ratio_" + part[len("radio_") :]
     return None
 
 
 def _ratio_counts(rows: list[dict[str, str]]) -> Counter[str]:
-    """Count every present ratio_* condition, including future ratio naming variants."""
+    """Count ratio_* conditions, accepting the legacy radio_* spelling."""
     return Counter(
         ratio for row in rows if (ratio := _ratio_from_condition(row.get("condition_path", ""))) is not None
     )

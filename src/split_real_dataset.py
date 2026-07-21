@@ -61,11 +61,13 @@ def ratio_key(condition_path: str) -> str:
     for part in Path(condition_path).parts:
         if part.startswith("ratio_"):
             return part
+        if part.startswith("radio_"):
+            return "ratio_" + part[len("radio_") :]
     return "__no_ratio__"
 
 
 def stratification_key(row: dict[str, str]) -> tuple[str, str]:
-    """Use first-level group labels and nested ratio_* conditions as split strata."""
+    """Use group labels and nested ratio_*/radio_* conditions as split strata."""
     return row["group"], ratio_key(row.get("condition_path", ""))
 
 

@@ -50,6 +50,8 @@ def ratio_from_condition(condition_path: str) -> str | None:
     for part in Path(condition_path).parts:
         if part.startswith("ratio_"):
             return part
+        if part.startswith("radio_"):
+            return "ratio_" + part[len("radio_") :]
     return None
 
 
