@@ -34,6 +34,8 @@ Removing that constraint and using thresholds `0.55 / 0.55 / 0.50` produced the 
 
 The structured residual checkpoint later reached approximately `0.906` exact match on the training split but only about `0.60` on validation/test. Per-label training accuracy was `0.9774 / 0.9654 / 0.9503 / 0.8292 / 0.8766 / 0.8137 / 0.9920`, confirming a severe generalization gap rather than a pure capacity limit.
 
+A strong-augmentation run reduced training exact match to about `0.57` and best validation exact match to `0.5564`, so frequency/time shifts, spectrum masks, and heavy regularization were rejected. The current profile is a low-learning-rate fine-tune from the pre-augmentation checkpoint with only mild gain/noise augmentation.
+
 ## Current Recommended Training Mode
 
 The current configuration is real-only training with absolute numeric features:

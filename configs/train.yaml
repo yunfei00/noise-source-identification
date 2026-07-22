@@ -35,16 +35,16 @@ augmentation:
   real:
     enabled: true
     gain_range:
-    - 0.7
-    - 1.4
+    - 0.9
+    - 1.1
     noise_snr_db_range:
-    - 25
-    - 45
-    frequency_shift_bins: 2
-    time_shift_bins: 8
-    frequency_mask_probability: 0.3
+    - 35
+    - 50
+    frequency_shift_bins: 0
+    time_shift_bins: 0
+    frequency_mask_probability: 0.0
     frequency_mask_width: 4
-    time_mask_probability: 0.3
+    time_mask_probability: 0.0
     time_mask_width: 6
 training_data:
   mode: real_only
@@ -68,26 +68,26 @@ real_split:
   seed: 42
   split_by_group: true
 train:
-  epochs: 200
+  epochs: 80
   batch_size: 32
   threshold: 0.5
-  lr: 0.001
+  lr: 0.0002
   device: auto
   num_workers: 0
 optimizer:
   type: adamw
-  weight_decay: 0.0005
+  weight_decay: 0.0001
 model:
   architecture: residual
   base_channels: 32
-  dropout: 0.35
+  dropout: 0.25
   auxiliary_heads:
     enabled: true
     multilabel_loss_weight: 0.3
     combo_loss_weight: 1.0
     count_loss_weight: 0.3
-    combo_label_smoothing: 0.05
-    count_label_smoothing: 0.03
+    combo_label_smoothing: 0.02
+    count_label_smoothing: 0.01
   prediction:
     mode: structured
     combo_score_weight: 1.0

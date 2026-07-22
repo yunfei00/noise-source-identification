@@ -834,7 +834,7 @@ def format_duration(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
 
-def train(config: dict) -> None:
+def train(config: dict, init_model: str | Path | None = None) -> None:
     seed = int(config.get("seed", 42))
     set_seed(seed)
 
@@ -889,6 +889,21 @@ def train(config: dict) -> None:
     )
 
     model = build_model(num_classes=len(class_names), config=config).to(device)
+    if init_model is not None:
+        init_path = Path(init_model)
+        if not init_path.exists():
+            raise FileNotFoundError(f"Initial model checkpoint not found: {init_path}")
+        try:
+            initial_checkpoint = torch.load(init_path, map_location=device, weights_only=False)
+        except TypeError:
+            initial_checkpoint = torch.load(init_path, map_location=device)
+        checkpoint_class_names = initial_checkpoint.get("class_names")
+        if checkpoint_class_names != class_names:
+            raise ValueError(
+                f"Initial checkpoint class_names mismatch: {checkpoint_class_names} vs {class_names}"
+            )
+        model.load_state_dict(initial_checkpoint["model_state"])
+        print(f"initialized_model={init_path}")
     train_labels = _dataset_labels(train_dataset)
     criterion = build_criterion(config, train_labels, class_names, device)
     optimizer_type = str(optimizer_config.get("type", "adam")).strip().lower()
@@ -1072,12 +1087,13 @@ def train(config: dict) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train a multi-label noise source classifier.")
     parser.add_argument("--config", type=Path, default=Path("configs/train.yaml"), help="Path to YAML config.")
+    parser.add_argument("--init-model", type=Path, help="Initialize weights from a compatible checkpoint.")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    train(load_config(args.config))
+    train(load_config(args.config), init_model=args.init_model)
 
 
 if __name__ == "__main__":

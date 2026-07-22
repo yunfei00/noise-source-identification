@@ -112,7 +112,14 @@ python -m src.split_real_dataset \
 python -m src.train --config configs/train.yaml
 ```
 
-For `real_only` training, moderate gain/noise, frequency/time shifts, and small spectrum masks are applied only to the training split. Validation and test features remain unchanged.
+For `real_only` training, configured augmentation is applied only to the training split. The current fine-tuning profile uses mild gain/noise changes and disables frequency/time shifts and spectrum masks. Validation and test features remain unchanged.
+
+To fine-tune from a compatible checkpoint instead of starting from random weights:
+
+```bash
+python -m src.train --config configs/train.yaml \
+  --init-model outputs/checkpoints/best_before_augmentation.pt
+```
 
 ### Step 5: Evaluate the structured combination model
 
