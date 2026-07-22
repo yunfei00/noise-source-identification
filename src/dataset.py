@@ -11,9 +11,8 @@ import torch
 from torch.utils.data import Dataset
 
 from src.features import (
-    apply_signal_normalization,
-    compute_stft_feature,
-    fix_length,
+    compute_model_feature,
+    fix_model_signal_length,
     prepare_stft_channels,
     read_signal_csv,
 )
@@ -39,6 +38,11 @@ def augment_real_stft_feature(
     rng: np.random.Generator,
 ) -> np.ndarray:
     """Apply moderate spectrum-domain augmentation to a real training sample."""
+    if str(input_representation).strip().lower() == "db_trace":
+        raise ValueError(
+            "Spectrum-domain augmentation is not supported for db_trace features; "
+            "set augmentation.real.enabled=false."
+        )
     feature = np.asarray(feature, dtype=np.float32)
     if feature.ndim != 3 or feature.shape[0] < 1:
         raise ValueError(f"Expected [channels,freq,time] feature, got {feature.shape}")
@@ -156,6 +160,11 @@ class SyntheticNpyDataset(Dataset):
         self.magnitude_scale = str(stft_config.get("magnitude_scale", "log1p"))
         self.input_representation = str(stft_config.get("input_representation", "single"))
         self.signal_normalization = str(config.get("preprocessing", {}).get("signal_normalization", "standardize"))
+        db_level_range = stft_config.get("db_level_range", [-110.0, -50.0])
+        if not isinstance(db_level_range, (list, tuple)) or len(db_level_range) != 2:
+            raise ValueError("stft.db_level_range must contain exactly two values")
+        self.db_level_range = (float(db_level_range[0]), float(db_level_range[1]))
+        self.db_variation_scale = float(stft_config.get("db_variation_scale", 15.0))
 
     def __len__(self) -> int:
         return len(self.x_files)
@@ -166,16 +175,20 @@ class SyntheticNpyDataset(Dataset):
         return self._to_tensors(signal, label)
 
     def _to_tensors(self, signal: np.ndarray, label: np.ndarray) -> tuple[torch.Tensor, torch.Tensor]:
-        feature = compute_stft_feature(
-            apply_signal_normalization(signal, self.signal_normalization),
+        feature = compute_model_feature(
+            signal,
             sample_rate=self.sample_rate,
             nperseg=self.nperseg,
             noverlap=self.noverlap,
             target_freq_bins=self.target_freq_bins,
             target_time_bins=self.target_time_bins,
             magnitude_scale=self.magnitude_scale,
+            input_representation=self.input_representation,
+            signal_normalization=self.signal_normalization,
+            db_level_range=self.db_level_range,
+            db_variation_scale=self.db_variation_scale,
         )
-        x = torch.from_numpy(prepare_stft_channels(feature, self.input_representation)).float()
+        x = torch.from_numpy(feature).float()
         y = torch.from_numpy(label).float()
         return x, y
 
@@ -306,6 +319,8 @@ class RealCsvDataset(SyntheticNpyDataset):
             "magnitude_scale": self.magnitude_scale,
             "input_representation": self.input_representation,
             "signal_normalization": self.signal_normalization,
+            "db_level_range": self.db_level_range,
+            "db_variation_scale": self.db_variation_scale,
         }
         return hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:12]
 
@@ -320,9 +335,8 @@ class RealCsvDataset(SyntheticNpyDataset):
                 return np.load(cache_path).astype(np.float32, copy=False)
 
         signal = read_signal_csv(csv_path)
-        signal = fix_length(signal, self.signal_length)
-        signal = apply_signal_normalization(signal, self.signal_normalization)
-        feature = compute_stft_feature(
+        signal = fix_model_signal_length(signal, self.signal_length, self.input_representation)
+        feature = compute_model_feature(
             signal,
             sample_rate=self.sample_rate,
             nperseg=self.nperseg,
@@ -330,8 +344,11 @@ class RealCsvDataset(SyntheticNpyDataset):
             target_freq_bins=self.target_freq_bins,
             target_time_bins=self.target_time_bins,
             magnitude_scale=self.magnitude_scale,
+            input_representation=self.input_representation,
+            signal_normalization=self.signal_normalization,
+            db_level_range=self.db_level_range,
+            db_variation_scale=self.db_variation_scale,
         )
-        feature = prepare_stft_channels(feature, self.input_representation)
 
         if self.cache_enabled:
             cache_path = self._cache_path(relative_file)

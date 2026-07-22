@@ -198,7 +198,17 @@ def build_model(num_classes: int, config: dict) -> NoiseCNN:
     auxiliary_config = model_config.get("auxiliary_heads", {})
     prediction_config = model_config.get("prediction", {})
     input_representation = str(config.get("stft", {}).get("input_representation", "single"))
-    input_channels = 2 if input_representation.strip().lower() == "absolute_relative" else 1
+    input_channels_by_representation = {
+        "single": 1,
+        "absolute": 1,
+        "legacy": 1,
+        "absolute_relative": 2,
+        "db_trace": 4,
+    }
+    normalized_representation = input_representation.strip().lower()
+    if normalized_representation not in input_channels_by_representation:
+        raise ValueError(f"Unsupported stft.input_representation: {input_representation}")
+    input_channels = input_channels_by_representation[normalized_representation]
     return NoiseCNN(
         num_classes=num_classes,
         auxiliary_heads=bool(auxiliary_config.get("enabled", False)),

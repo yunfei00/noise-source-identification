@@ -82,8 +82,10 @@ early_stopping:
 
 关键点：
 
-- `preprocessing.signal_normalization: none`：保留原始时域幅值，不做单样本 z-score。
-- `stft.magnitude_scale: absolute`：使用 STFT 线性绝对幅值，不使用 dB，也不使用 `log1p` 对数压缩。
+- CSV 第一列是时间，第二列是频谱仪采集的负 dB 轨迹，不是线性时域波形。
+- `stft.input_representation: db_trace`：先减去每条轨迹的中位 dB 基线，再对波动量做 STFT。
+- 模型输入为四通道：波动绝对谱、波动相对谱、中位 dB 电平、dB 波动强度。
+- 长度不足时用该轨迹的中位 dB 补齐，避免补 `0 dB` 造成伪跳变。
 - `best.pt` 按验证集 `exact_match` 保存。
 
 ## 推荐执行流程
@@ -129,14 +131,7 @@ python -m src.analyze_label_distribution \
 python -m src.train --config configs/train.yaml
 ```
 
-在 `real_only` 模式下，配置的数据增强只应用于训练集。当前微调配置仅使用轻微增益/噪声变化，关闭频率/时间平移和频谱遮挡；验证集和测试集保持原始特征不变。
-
-需要从兼容检查点微调而不是随机初始化时：
-
-```bash
-python -m src.train --config configs/train.yaml \
-  --init-model outputs/checkpoints/best_before_augmentation.pt
-```
+当前 dB 轨迹特征把模型输入从两通道改为四通道，必须从头训练。不要添加 `--init-model` 加载旧检查点；当前配置也关闭了此前已证明会欠拟合的频谱增强。
 
 评估结构化组合模型：
 

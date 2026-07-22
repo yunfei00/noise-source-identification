@@ -112,14 +112,9 @@ python -m src.split_real_dataset \
 python -m src.train --config configs/train.yaml
 ```
 
-For `real_only` training, configured augmentation is applied only to the training split. The current fine-tuning profile uses mild gain/noise changes and disables frequency/time shifts and spectrum masks. Validation and test features remain unchanged.
+The CSV second column is a negative dB-vs-time trace from the spectrum analyzer, not a linear waveform. The `db_trace` representation removes each trace's median baseline before STFT and then supplies four channels: absolute fluctuation spectrum, relative fluctuation spectrum, median dB level, and dB variation strength. Short traces are padded with their median dB value rather than a false `0 dB` tail.
 
-To fine-tune from a compatible checkpoint instead of starting from random weights:
-
-```bash
-python -m src.train --config configs/train.yaml \
-  --init-model outputs/checkpoints/best_before_augmentation.pt
-```
+This changes the model input from two channels to four, so train from scratch and do not pass `--init-model` for this experiment. The current profile also disables the spectrum augmentation that previously caused underfitting.
 
 ### Step 5: Evaluate the structured combination model
 
@@ -212,6 +207,9 @@ early_stopping:
 
 stft:
   magnitude_scale: absolute
+  input_representation: db_trace
+  db_level_range: [-110.0, -50.0]
+  db_variation_scale: 15.0
 ```
 
 In `real_only` mode:
@@ -221,10 +219,11 @@ In `real_only` mode:
 - Samples are loaded lazily from CSV files listed in `real_data.split_file`.
 - An empty split file raises a clear training error.
 
-The current feature path preserves absolute numeric scale:
+The current feature path is specialized for spectrum-analyzer dB traces:
 
-- `preprocessing.signal_normalization: none` keeps raw time-domain amplitude values.
-- `stft.magnitude_scale: absolute` uses linear STFT magnitude, not dB or log-compressed features.
+- The per-file median dB baseline is removed before computing the fluctuation STFT.
+- Absolute level and variation are retained as two separate scalar feature channels.
+- Legacy `single` and `absolute_relative` representations remain available for old checkpoints.
 
 ## How training samples are fixed
 

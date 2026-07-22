@@ -1,6 +1,6 @@
 # Project Status
 
-Updated: 2026-07-20
+Updated: 2026-07-22
 
 ## Current Goal
 
@@ -34,11 +34,13 @@ Removing that constraint and using thresholds `0.55 / 0.55 / 0.50` produced the 
 
 The structured residual checkpoint later reached approximately `0.906` exact match on the training split but only about `0.60` on validation/test. Per-label training accuracy was `0.9774 / 0.9654 / 0.9503 / 0.8292 / 0.8766 / 0.8137 / 0.9920`, confirming a severe generalization gap rather than a pure capacity limit.
 
-A strong-augmentation run reduced training exact match to about `0.57` and best validation exact match to `0.5564`, so frequency/time shifts, spectrum masks, and heavy regularization were rejected. The current profile is a low-learning-rate fine-tune from the pre-augmentation checkpoint with only mild gain/noise augmentation.
+A strong-augmentation run reduced training exact match to about `0.57` and best validation exact match to `0.5564`, so frequency/time shifts, spectrum masks, and heavy regularization were rejected.
+
+The CSV format was subsequently clarified: column one is time and column two is the spectrum analyzer's negative dB reading, typically around `-77 dB`; one inspected trace ranged from `-93 dB` to `-67 dB`. The previous pipeline incorrectly treated this as a linear waveform. Its large dB baseline could therefore dominate the STFT and is now considered the most important unresolved representation error.
 
 ## Current Recommended Training Mode
 
-The current configuration is real-only training with absolute numeric features:
+The current configuration is real-only training with a dedicated dB-trace representation:
 
 ```yaml
 training_data:
@@ -56,7 +58,9 @@ sampler:
 
 stft:
   magnitude_scale: absolute
-  input_representation: absolute_relative
+  input_representation: db_trace
+  db_level_range: [-110.0, -50.0]
+  db_variation_scale: 15.0
 
 model:
   architecture: residual
@@ -68,11 +72,11 @@ model:
 
 Important details:
 
-- Time-domain CSV values are kept at their original numeric scale.
-- STFT features use linear absolute magnitude.
-- dB features are intentionally not used.
-- `log1p` STFT compression is kept only as a legacy option, not the current default.
-- Real feature cache keys now include `signal_normalization` and `magnitude_scale`, so old and new cached features should not collide.
+- The median dB baseline is removed before STFT, preventing the roughly `-77 dB` offset from dominating the learned spectrum.
+- Four channels retain the centered absolute spectrum, centered relative spectrum, median absolute dB level, and dB variation strength.
+- Short dB traces are padded with their median value rather than `0 dB`.
+- This is a four-channel input and is not compatible with old two-channel checkpoints; the next run must start from scratch.
+- Real feature cache keys include the dB representation parameters, so incompatible cached features do not collide.
 
 ## Implemented So Far
 
@@ -107,9 +111,10 @@ Important details:
   - `src.feature_statistics` analyzes raw signal / FFT / STFT energy statistics.
 
 - Current feature update:
-  - `preprocessing.signal_normalization: none`
-  - `stft.magnitude_scale: absolute`
-  - training, evaluation, single-file inference, folder inference, and real-vs-synthetic analysis now use the same configurable feature path.
+  - dedicated four-channel `db_trace` representation
+  - median-baseline removal before STFT
+  - separate absolute-level and variation-strength channels
+  - shared training, evaluation, and single/folder inference feature path
 
 - Structured-model update:
   - residual spectral backbone with coarse frequency position preserved

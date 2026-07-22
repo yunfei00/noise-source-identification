@@ -12,8 +12,14 @@ from torch import nn
 from src.build_real_index import build_real_index
 from src.dataset import augment_real_stft_feature, parse_group_label
 from src.evaluate import compute_metrics, compute_ratio_accuracy
-from src.features import apply_signal_normalization, compute_stft_feature, prepare_stft_channels
-from src.model_cnn import NoiseCNN
+from src.features import (
+    apply_signal_normalization,
+    compute_stft_feature,
+    fix_model_signal_length,
+    prepare_db_trace_channels,
+    prepare_stft_channels,
+)
+from src.model_cnn import NoiseCNN, build_model
 from src.search_thresholds import threshold_values
 from src.split_real_dataset import split_rows
 from src.template_ensemble import (
@@ -145,6 +151,51 @@ class ThreeSourceRealDatasetTest(unittest.TestCase):
         self.assertEqual(channels.shape, (2, 2, 2))
         np.testing.assert_allclose(channels[0], feature)
         np.testing.assert_allclose(channels[1], scaled_channels[1], rtol=1e-6, atol=1e-6)
+
+    def test_db_trace_channels_remove_baseline_but_preserve_level(self) -> None:
+        time = np.arange(64, dtype=np.float32)
+        signal = -77.0 + 4.0 * np.sin(2.0 * np.pi * time / 8.0)
+
+        channels = prepare_db_trace_channels(
+            signal,
+            sample_rate=64,
+            nperseg=16,
+            noverlap=8,
+            target_freq_bins=12,
+            target_time_bins=8,
+        )
+        shifted = prepare_db_trace_channels(
+            signal + 10.0,
+            sample_rate=64,
+            nperseg=16,
+            noverlap=8,
+            target_freq_bins=12,
+            target_time_bins=8,
+        )
+
+        self.assertEqual(channels.shape, (4, 12, 8))
+        np.testing.assert_allclose(channels[:2], shifted[:2], rtol=1e-5, atol=1e-5)
+        self.assertGreater(float(shifted[2, 0, 0]), float(channels[2, 0, 0]))
+        np.testing.assert_allclose(channels[3], shifted[3], rtol=1e-6, atol=1e-6)
+
+    def test_db_trace_length_padding_uses_median_level(self) -> None:
+        signal = np.asarray([-93.0, -77.0, -67.0], dtype=np.float32)
+
+        fixed = fix_model_signal_length(signal, 6, "db_trace")
+
+        np.testing.assert_allclose(fixed, [-93.0, -77.0, -67.0, -77.0, -77.0, -77.0])
+
+    def test_db_trace_configuration_builds_four_channel_model(self) -> None:
+        model = build_model(
+            num_classes=3,
+            config={
+                "stft": {"input_representation": "db_trace"},
+                "model": {"architecture": "residual", "base_channels": 8},
+            },
+        )
+
+        self.assertEqual(model.features[0].in_channels, 4)
+        self.assertEqual(tuple(model(torch.randn(2, 4, 128, 64)).shape), (2, 3))
 
     def test_real_stft_augmentation_preserves_shape_and_input(self) -> None:
         absolute = np.linspace(0.0, 1.0, 32, dtype=np.float32).reshape(8, 4)

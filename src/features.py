@@ -144,6 +144,7 @@ def fix_length(
     *,
     random_crop: bool = False,
     rng: np.random.Generator | None = None,
+    pad_value: float = 0.0,
 ) -> np.ndarray:
     """Pad or crop a signal to a fixed length."""
     if target_length <= 0:
@@ -156,7 +157,7 @@ def fix_length(
         return signal.astype(np.float32, copy=False)
 
     if current_length < target_length:
-        output = np.zeros(target_length, dtype=np.float32)
+        output = np.full(target_length, float(pad_value), dtype=np.float32)
         output[:current_length] = signal
         return output
 
@@ -288,3 +289,120 @@ def prepare_stft_channels(
     scale = max(rms, 1e-12)
     relative = np.log1p(feature / scale).astype(np.float32, copy=False)
     return np.stack((feature, relative), axis=0).astype(np.float32, copy=False)
+
+
+def fix_model_signal_length(
+    signal: np.ndarray,
+    target_length: int,
+    input_representation: str = "single",
+) -> np.ndarray:
+    """Fix signal length without introducing a false 0 dB tail for dB traces."""
+    signal = np.asarray(signal, dtype=np.float32).reshape(-1)
+    representation = str(input_representation).strip().lower()
+    if representation != "db_trace":
+        return fix_length(signal, target_length)
+
+    finite = signal[np.isfinite(signal)]
+    pad_value = float(np.median(finite)) if finite.size else 0.0
+    return fix_length(signal, target_length, pad_value=pad_value)
+
+
+def prepare_db_trace_channels(
+    signal: np.ndarray,
+    sample_rate: int,
+    nperseg: int,
+    noverlap: int,
+    target_freq_bins: int,
+    target_time_bins: int,
+    *,
+    db_level_range: tuple[float, float] = (-110.0, -50.0),
+    db_variation_scale: float = 15.0,
+) -> np.ndarray:
+    """Build four model channels from a spectrum-analyzer dB-vs-time trace.
+
+    The large absolute dB baseline is removed before STFT so it cannot dominate
+    the fluctuation spectrum. Two constant metadata channels retain the absolute
+    median level and the trace standard deviation, both scaled to roughly [0, 1].
+    """
+    signal = np.asarray(signal, dtype=np.float32).reshape(-1)
+    if signal.size == 0:
+        raise ValueError("Cannot prepare dB trace features from an empty signal")
+
+    finite = signal[np.isfinite(signal)]
+    if finite.size == 0:
+        raise ValueError("dB trace contains no finite samples")
+    median_db = float(np.median(finite))
+    clean_signal = np.nan_to_num(
+        signal,
+        nan=median_db,
+        posinf=median_db,
+        neginf=median_db,
+    ).astype(np.float32, copy=False)
+    centered = (clean_signal - median_db).astype(np.float32, copy=False)
+
+    absolute = compute_stft_feature(
+        centered,
+        sample_rate=sample_rate,
+        nperseg=nperseg,
+        noverlap=noverlap,
+        target_freq_bins=target_freq_bins,
+        target_time_bins=target_time_bins,
+        magnitude_scale="absolute",
+    )
+    spectral_channels = prepare_stft_channels(absolute, "absolute_relative")
+
+    level_min, level_max = float(db_level_range[0]), float(db_level_range[1])
+    if level_max <= level_min:
+        raise ValueError("stft.db_level_range maximum must be greater than minimum")
+    if db_variation_scale <= 0.0:
+        raise ValueError("stft.db_variation_scale must be positive")
+    level_value = float(np.clip((median_db - level_min) / (level_max - level_min), 0.0, 1.0))
+    variation_value = float(np.clip(np.std(centered) / db_variation_scale, 0.0, 1.0))
+    metadata_shape = (1, target_freq_bins, target_time_bins)
+    level_channel = np.full(metadata_shape, level_value, dtype=np.float32)
+    variation_channel = np.full(metadata_shape, variation_value, dtype=np.float32)
+    return np.concatenate(
+        (spectral_channels, level_channel, variation_channel),
+        axis=0,
+    ).astype(np.float32, copy=False)
+
+
+def compute_model_feature(
+    signal: np.ndarray,
+    sample_rate: int,
+    nperseg: int,
+    noverlap: int,
+    target_freq_bins: int,
+    target_time_bins: int,
+    *,
+    magnitude_scale: str = "log1p",
+    input_representation: str = "single",
+    signal_normalization: str = "standardize",
+    db_level_range: tuple[float, float] = (-110.0, -50.0),
+    db_variation_scale: float = 15.0,
+) -> np.ndarray:
+    """Compute the configured model input through one shared feature path."""
+    representation = str(input_representation).strip().lower()
+    if representation == "db_trace":
+        return prepare_db_trace_channels(
+            signal,
+            sample_rate=sample_rate,
+            nperseg=nperseg,
+            noverlap=noverlap,
+            target_freq_bins=target_freq_bins,
+            target_time_bins=target_time_bins,
+            db_level_range=db_level_range,
+            db_variation_scale=db_variation_scale,
+        )
+
+    normalized = apply_signal_normalization(signal, signal_normalization)
+    feature = compute_stft_feature(
+        normalized,
+        sample_rate=sample_rate,
+        nperseg=nperseg,
+        noverlap=noverlap,
+        target_freq_bins=target_freq_bins,
+        target_time_bins=target_time_bins,
+        magnitude_scale=magnitude_scale,
+    )
+    return prepare_stft_channels(feature, representation)

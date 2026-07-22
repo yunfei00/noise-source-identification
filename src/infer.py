@@ -7,10 +7,8 @@ import numpy as np
 import torch
 
 from src.features import (
-    apply_signal_normalization,
-    compute_stft_feature,
-    fix_length,
-    prepare_stft_channels,
+    compute_model_feature,
+    fix_model_signal_length,
     read_signal_csv,
 )
 from src.model_cnn import build_model
@@ -51,10 +49,14 @@ def infer(model_path: str | Path, input_path: str | Path, device_name: str = "au
     data_config = config.get("data", {})
     stft_config = config.get("stft", {})
     preprocessing_config = config.get("preprocessing", {})
+    input_representation = str(stft_config.get("input_representation", "single"))
     signal = read_signal_csv(input_path)
-    signal = fix_length(signal, int(data_config.get("signal_length", 4096)))
-    signal = apply_signal_normalization(signal, str(preprocessing_config.get("signal_normalization", "standardize")))
-    feature = compute_stft_feature(
+    signal = fix_model_signal_length(
+        signal,
+        int(data_config.get("signal_length", 4096)),
+        input_representation,
+    )
+    feature = compute_model_feature(
         signal,
         sample_rate=int(data_config.get("sample_rate", 1_000_000)),
         nperseg=int(stft_config.get("nperseg", 256)),
@@ -62,8 +64,11 @@ def infer(model_path: str | Path, input_path: str | Path, device_name: str = "au
         target_freq_bins=int(stft_config.get("target_freq_bins", 128)),
         target_time_bins=int(stft_config.get("target_time_bins", 64)),
         magnitude_scale=str(stft_config.get("magnitude_scale", "log1p")),
+        input_representation=input_representation,
+        signal_normalization=str(preprocessing_config.get("signal_normalization", "standardize")),
+        db_level_range=tuple(stft_config.get("db_level_range", [-110.0, -50.0])),
+        db_variation_scale=float(stft_config.get("db_variation_scale", 15.0)),
     )
-    feature = prepare_stft_channels(feature, str(stft_config.get("input_representation", "single")))
 
     model = build_model(num_classes=len(class_names), config=config).to(device)
     model.load_state_dict(checkpoint["model_state"])

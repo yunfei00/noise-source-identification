@@ -33,7 +33,7 @@ augmentation:
   mix_normalization: rms
   source_dropout_prob: 0.0
   real:
-    enabled: true
+    enabled: false
     gain_range:
     - 0.9
     - 1.1
@@ -68,10 +68,10 @@ real_split:
   seed: 42
   split_by_group: true
 train:
-  epochs: 80
+  epochs: 200
   batch_size: 32
   threshold: 0.5
-  lr: 0.0002
+  lr: 0.001
   device: auto
   num_workers: 0
 optimizer:
@@ -80,14 +80,14 @@ optimizer:
 model:
   architecture: residual
   base_channels: 32
-  dropout: 0.25
+  dropout: 0.2
   auxiliary_heads:
     enabled: true
     multilabel_loss_weight: 0.3
     combo_loss_weight: 1.0
     count_loss_weight: 0.3
-    combo_label_smoothing: 0.02
-    count_label_smoothing: 0.01
+    combo_label_smoothing: 0.0
+    count_label_smoothing: 0.0
   prediction:
     mode: structured
     combo_score_weight: 1.0
@@ -123,7 +123,13 @@ stft:
   target_freq_bins: 128
   target_time_bins: 64
   magnitude_scale: absolute
-  input_representation: absolute_relative
+  # The CSV second column is a negative dB trace, not a linear waveform.
+  # Channels: centered-trace STFT, relative STFT, median dB, dB variation.
+  input_representation: db_trace
+  db_level_range:
+  - -110.0
+  - -50.0
+  db_variation_scale: 15.0
 scheduler:
   enabled: true
   type: ReduceLROnPlateau
