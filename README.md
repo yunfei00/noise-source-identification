@@ -108,6 +108,16 @@ python -m src.split_real_dataset \
 
 ### Step 4: Train
 
+Before indexing or training a newly collected `source_1/source_3/source_4` dataset, run the read-only audit:
+
+```bash
+python -m src.audit_real_data \
+  --class-names source_1 source_3 source_4 \
+  --output outputs/reports/source_134_data_audit.json
+```
+
+The single JSON report contains counts, label/ratio coverage, dB and length distributions, suspicious files, and recommended preprocessing parameters. The command also prints a compact `copy_paste_summary`. Add `--no-signal-threshold-db` only after measuring a reliable no-signal/background threshold.
+
 ```bash
 python -m src.train --config configs/train.yaml
 ```

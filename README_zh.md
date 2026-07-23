@@ -90,6 +90,18 @@ early_stopping:
 
 ## 推荐执行流程
 
+新数据采集完成后，先运行一次只读体检：
+
+```bash
+python -m src.audit_real_data \
+  --class-names source_1 source_3 source_4 \
+  --output outputs/reports/source_134_data_audit.json
+```
+
+所有数量、七类/比例分布、dB 范围、长度分布、异常文件和推荐预处理参数都会写入这一个 JSON 文件。终端同时打印其中的 `copy_paste_summary`，可以直接把这段结果发回来。脚本不会修改原始 CSV。
+
+如果已经通过空载采集确定“无信号”的 dB 上限，还可以增加例如 `--no-signal-threshold-db -90`；没有可靠空载阈值时不要填写，避免把正常的弱信号误判为坏数据。
+
 检查路径：
 
 ```bash

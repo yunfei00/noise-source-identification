@@ -9,6 +9,7 @@ import numpy as np
 import torch
 from torch import nn
 
+from src.audit_real_data import audit_real_data, compute_db_statistics
 from src.build_real_index import build_real_index
 from src.dataset import augment_real_stft_feature, parse_group_label
 from src.evaluate import compute_metrics, compute_ratio_accuracy
@@ -32,6 +33,70 @@ from src.train import AsymmetricBCEWithLogitsLoss, MultiTaskLoss
 
 
 class ThreeSourceRealDatasetTest(unittest.TestCase):
+    def test_db_audit_writes_counts_ranges_recommendations_and_issues(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            single_dir = root / "data" / "single"
+            combo_dir = root / "data" / "real_dataset"
+            normal_rows = "time,db\n0,-80\n1,-78\n2,-76\n3,-79\n"
+            for source in ("source_1", "source_3", "source_4"):
+                path = single_dir / source / "600.000MHz" / "000001.csv"
+                path.parent.mkdir(parents=True)
+                path.write_text(normal_rows, encoding="utf-8")
+            nonfinite_path = single_dir / "source_1" / "600.000MHz" / "000001.csv"
+            nonfinite_path.write_text(normal_rows + "4,nan\n", encoding="utf-8")
+            flat_path = single_dir / "source_3" / "600.000MHz" / "000002.csv"
+            flat_path.write_text("time,db\n0,-95\n1,-95\n2,-95\n3,-95\n", encoding="utf-8")
+            bad_path = single_dir / "source_4" / "600.000MHz" / "bad.csv"
+            bad_path.write_text("time,db\na,b\n", encoding="utf-8")
+
+            combo_path = (
+                combo_dir
+                / "source_1_source_3_mix"
+                / "radio_1_2"
+                / "600.000MHz"
+                / "000001.csv"
+            )
+            combo_path.parent.mkdir(parents=True)
+            combo_path.write_text(normal_rows, encoding="utf-8")
+            output = root / "outputs" / "real_data_audit.json"
+
+            report = audit_real_data(
+                single_dir=single_dir,
+                combo_dir=combo_dir,
+                output=output,
+                class_names=["source_1", "source_3", "source_4"],
+                expected_length=4,
+                no_signal_threshold_db=-90.0,
+            )
+
+            self.assertTrue(output.exists())
+            self.assertEqual(report["class_names"], ["source_1", "source_3", "source_4"])
+            self.assertEqual(report["counts"]["discovered_files"], 6)
+            self.assertEqual(report["counts"]["parsed_files"], 5)
+            self.assertEqual(report["counts"]["parse_failed_files"], 1)
+            self.assertEqual(report["counts"]["ratio_counts"]["ratio_1_2"], 1)
+            self.assertEqual(
+                report["counts"]["group_ratio_counts"]["source_1_source_3_mix"]["ratio_1_2"],
+                1,
+            )
+            self.assertEqual(report["signal_summary"]["observed_db_min"], -95.0)
+            self.assertEqual(report["recommended_preprocessing"]["signal_length"], 4)
+            self.assertIn("parse_failure", report["issues"]["counts_by_type"])
+            self.assertIn("flat_or_nearly_flat", report["issues"]["counts_by_type"])
+            self.assertIn("nonfinite_values", report["issues"]["counts_by_type"])
+            self.assertIn("possible_no_signal", report["issues"]["counts_by_type"])
+
+    def test_db_audit_jump_statistics(self) -> None:
+        stats = compute_db_statistics(
+            np.asarray([-80.0, -79.0, -60.0, -61.0], dtype=np.float32),
+            jump_threshold_db=12.0,
+        )
+
+        self.assertEqual(stats["num_samples"], 4)
+        self.assertEqual(stats["max_jump_db"], 19.0)
+        self.assertEqual(stats["jump_count"], 1)
+
     def test_parse_three_source_mix_label(self) -> None:
         label = parse_group_label("source_1_source_3_source_5_mix", ["source_1", "source_3", "source_5"])
         self.assertEqual(label.astype(int).tolist(), [1, 1, 1])

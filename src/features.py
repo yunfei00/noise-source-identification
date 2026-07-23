@@ -23,6 +23,8 @@ class SignalCsvInfo:
     values: np.ndarray
     found_data_line: bool
     data_line_number: int | None
+    numeric_value_count: int
+    discarded_nonfinite_count: int
 
 
 def _split_numeric_tokens(line: str) -> list[str]:
@@ -115,11 +117,19 @@ def read_signal_csv_info(path: str | Path) -> SignalCsvInfo:
             values=array,
             found_data_line=True,
             data_line_number=data_line_index + 1,
+            numeric_value_count=len(values),
+            discarded_nonfinite_count=sum(not np.isfinite(value) for value in values),
         )
 
     values = _parse_legacy_rows(lines)
     array = _finite_float32_values(values, csv_path)
-    return SignalCsvInfo(values=array, found_data_line=False, data_line_number=None)
+    return SignalCsvInfo(
+        values=array,
+        found_data_line=False,
+        data_line_number=None,
+        numeric_value_count=len(values),
+        discarded_nonfinite_count=sum(not np.isfinite(value) for value in values),
+    )
 
 
 def read_signal_csv(path: str | Path) -> np.ndarray:
