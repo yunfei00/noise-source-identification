@@ -186,6 +186,36 @@ python -m src.infer_folder \
   --unknown-threshold 0.35
 ```
 
+Strict single-file inference with a machine-readable result and a model
+inference-contract report:
+
+```bash
+python scripts/predict_single_csv.py \
+  --csv path/to/instrument_export.csv \
+  --checkpoint outputs/checkpoints/best.pt \
+  --device auto \
+  --report-dir outputs/inference_contract
+```
+
+The single-file entry requires a standalone `DATA` marker and finite numeric
+values in the second column after it. It restores labels, model structure,
+preprocessing, and the default threshold from the checkpoint; `--config` is
+required only when a pure state dict has no embedded training contract.
+`--threshold` accepts either one value or one comma-separated value per label.
+The output directory receives `<sample>_prediction.json` and
+`inference_contract.md`.
+
+GUI or other Python code can call the same implementation directly:
+
+```python
+from src.inference import predict_single_csv
+
+result = predict_single_csv(
+    csv_path="path/to/instrument_export.csv",
+    checkpoint_path="outputs/checkpoints/best.pt",
+)
+```
+
 For recursively inferring an arbitrarily nested, unlabeled metadata folder and reporting prediction distributions:
 
 ```bash

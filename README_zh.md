@@ -155,6 +155,29 @@ python -m src.evaluate \
 
 当前推荐模型直接从七种有效噪声源组合中选择一种，因此不再搜索三个独立阈值。`src.search_thresholds` 仅保留给旧的 `multilabel` 检查点使用。
 
+对单个 CSV 严格推理，并同时生成结构化 JSON 与模型推理契约报告：
+
+```bash
+python scripts/predict_single_csv.py \
+  --csv path/to/instrument_export.csv \
+  --checkpoint outputs/checkpoints/best.pt \
+  --device auto \
+  --report-dir outputs/inference_contract
+```
+
+单文件入口要求 CSV 中存在独占一行的 `DATA` 标志，且其后第二列全部为有限数值。模型结构、标签顺序、预处理配置和默认阈值优先从 checkpoint 恢复；只有纯 `state_dict` 没有内嵌训练契约时才必须传 `--config`。`--threshold` 可以是一个统一阈值，也可以是按标签顺序排列的逗号分隔阈值。输出目录包含 `<样本名>_prediction.json` 和 `inference_contract.md`。
+
+未来 GUI 可以直接调用同一个 Python 接口，无需启动外部进程：
+
+```python
+from src.inference import predict_single_csv
+
+result = predict_single_csv(
+    csv_path="path/to/instrument_export.csv",
+    checkpoint_path="outputs/checkpoints/best.pt",
+)
+```
+
 对一个没有真实标签、目录层级任意的文件夹递归推理并统计分布：
 
 ```bash
