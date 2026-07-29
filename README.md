@@ -186,6 +186,18 @@ python -m src.infer_folder \
   --unknown-threshold 0.35
 ```
 
+For recursively inferring an arbitrarily nested, unlabeled metadata folder and reporting prediction distributions:
+
+```bash
+python -m src.infer_metadata_folder \
+  --model outputs/checkpoints/best.pt \
+  --input-dir data/metadata \
+  --output outputs/reports/metadata_inference.csv \
+  --confidence-threshold 0.6
+```
+
+The CSV contains per-file predictions. The adjacent `.summary.json` contains combination/source distributions, confidence and margin statistics, second choices, low-confidence files, failures, and first-level-folder breakdowns. Class names come from the checkpoint. Use `src.infer_folder` or `src.evaluate` instead when folder names provide ground truth and accuracy metrics are required.
+
 ## Configuration
 
 `configs/train.yaml` is configured for real-only training without quota-selected balanced training:

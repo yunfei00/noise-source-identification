@@ -155,6 +155,18 @@ python -m src.evaluate \
 
 当前推荐模型直接从七种有效噪声源组合中选择一种，因此不再搜索三个独立阈值。`src.search_thresholds` 仅保留给旧的 `multilabel` 检查点使用。
 
+对一个没有真实标签、目录层级任意的文件夹递归推理并统计分布：
+
+```bash
+python -m src.infer_metadata_folder \
+  --model outputs/checkpoints/best.pt \
+  --input-dir data/metadata \
+  --output outputs/reports/metadata_inference.csv \
+  --confidence-threshold 0.6
+```
+
+命令递归处理所有 CSV。逐文件预测写入 `metadata_inference.csv`，组合分布、各信号源出现率、平均概率、置信度、第二候选、低置信度文件和失败文件写入 `metadata_inference.summary.json`。类别名称直接读取模型检查点，因此同时适用于 `source_1/source_3/source_4` 等后续模型。该命令不依赖文件夹名称提供真实标签；需要计算真实准确率时仍使用 `src.infer_folder` 或 `src.evaluate`。
+
 物理频谱模板与神经网络融合评估：
 
 ```bash

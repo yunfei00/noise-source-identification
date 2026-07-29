@@ -20,6 +20,7 @@ from src.features import (
     prepare_db_trace_channels,
     prepare_stft_channels,
 )
+from src.infer_metadata_folder import infer_metadata_folder
 from src.model_cnn import NoiseCNN, build_model
 from src.search_thresholds import threshold_values
 from src.split_real_dataset import split_rows
@@ -33,6 +34,89 @@ from src.train import AsymmetricBCEWithLogitsLoss, MultiTaskLoss
 
 
 class ThreeSourceRealDatasetTest(unittest.TestCase):
+    def test_metadata_folder_inference_recurses_and_reports_distribution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "metadata"
+            class_names = ["source_1", "source_3", "source_4"]
+            config = {
+                "data": {
+                    "sample_rate": 64,
+                    "signal_length": 64,
+                },
+                "preprocessing": {"signal_normalization": "none"},
+                "stft": {
+                    "nperseg": 16,
+                    "noverlap": 8,
+                    "target_freq_bins": 16,
+                    "target_time_bins": 8,
+                    "magnitude_scale": "absolute",
+                    "input_representation": "db_trace",
+                    "db_level_range": [-110.0, -50.0],
+                    "db_variation_scale": 15.0,
+                },
+                "model": {
+                    "architecture": "lightweight",
+                    "auxiliary_heads": {"enabled": True},
+                    "prediction": {"mode": "structured"},
+                },
+            }
+            model = build_model(num_classes=3, config=config)
+            checkpoint = root / "best.pt"
+            torch.save(
+                {
+                    "model_state": model.state_dict(),
+                    "class_names": class_names,
+                    "config": config,
+                },
+                checkpoint,
+            )
+
+            time = np.arange(64, dtype=np.float32)
+            for relative, offset in (
+                (Path("batch_a") / "nested" / "a.csv", 0.0),
+                (Path("root_sample.csv"), 3.0),
+            ):
+                path = input_dir / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                values = -80.0 + offset + 2.0 * np.sin(2.0 * np.pi * time / 8.0)
+                path.write_text(
+                    "time,db\n"
+                    + "\n".join(f"{index},{value:.5f}" for index, value in enumerate(values))
+                    + "\n",
+                    encoding="utf-8",
+                )
+            bad_path = input_dir / "batch_b" / "bad.csv"
+            bad_path.parent.mkdir(parents=True)
+            bad_path.write_text("time,db\nnot,data\n", encoding="utf-8")
+
+            output = root / "predictions.csv"
+            summary = infer_metadata_folder(
+                model_path=checkpoint,
+                input_dir=input_dir,
+                output=output,
+                device_name="cpu",
+                batch_size=2,
+                progress_every=0,
+            )
+
+            self.assertTrue(output.exists())
+            self.assertTrue(output.with_suffix(".summary.json").exists())
+            self.assertEqual(summary["discovered_csv_files"], 3)
+            self.assertEqual(summary["processed_files"], 2)
+            self.assertEqual(summary["failed_files"], 1)
+            self.assertEqual(len(summary["combination_distribution"]), 7)
+            self.assertEqual(
+                sum(
+                    int(metrics["count"])
+                    for metrics in summary["combination_distribution"].values()
+                ),
+                2,
+            )
+            self.assertEqual(set(summary["source_distribution"]), set(class_names))
+            self.assertIn("batch_a", summary["by_top_level_folder"])
+            self.assertIn("(root)", summary["by_top_level_folder"])
+
     def test_db_audit_writes_counts_ranges_recommendations_and_issues(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

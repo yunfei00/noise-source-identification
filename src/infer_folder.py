@@ -96,7 +96,7 @@ def find_csv_files(input_dir: str | Path) -> list[Path]:
     return [csv_path for _, csv_path in iter_group_csv_files(input_dir)]
 
 
-def _feature_from_csv(csv_path: Path, data_config: dict, stft_config: dict, preprocessing_config: dict) -> np.ndarray:
+def feature_from_csv(csv_path: Path, data_config: dict, stft_config: dict, preprocessing_config: dict) -> np.ndarray:
     input_representation = str(stft_config.get("input_representation", "single"))
     signal = read_signal_csv(csv_path)
     signal = fix_model_signal_length(
@@ -144,7 +144,7 @@ def infer_csv_probabilities(
     data_config = config.get("data", {})
     stft_config = config.get("stft", {})
     preprocessing_config = config.get("preprocessing", {})
-    feature = _feature_from_csv(csv_path, data_config, stft_config, preprocessing_config)
+    feature = feature_from_csv(csv_path, data_config, stft_config, preprocessing_config)
     x = torch.from_numpy(feature).unsqueeze(0).float().to(device)
     with torch.no_grad():
         if model.auxiliary_heads and model.prediction_mode == "structured":
