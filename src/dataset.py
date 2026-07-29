@@ -11,8 +11,8 @@ import torch
 from torch.utils.data import Dataset
 
 from src.features import (
-    compute_model_feature,
-    fix_model_signal_length,
+    PreprocessConfig,
+    preprocess_signal,
     prepare_stft_channels,
     read_signal_csv,
 )
@@ -165,18 +165,8 @@ class SyntheticNpyDataset(Dataset):
             raise ValueError("stft.db_level_range must contain exactly two values")
         self.db_level_range = (float(db_level_range[0]), float(db_level_range[1]))
         self.db_variation_scale = float(stft_config.get("db_variation_scale", 15.0))
-
-    def __len__(self) -> int:
-        return len(self.x_files)
-
-    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
-        signal = np.load(self.x_files[index]).astype(np.float32, copy=False)
-        label = np.load(self.y_files[index]).astype(np.float32, copy=False)
-        return self._to_tensors(signal, label)
-
-    def _to_tensors(self, signal: np.ndarray, label: np.ndarray) -> tuple[torch.Tensor, torch.Tensor]:
-        feature = compute_model_feature(
-            signal,
+        self.preprocess_config = PreprocessConfig(
+            signal_length=self.signal_length,
             sample_rate=self.sample_rate,
             nperseg=self.nperseg,
             noverlap=self.noverlap,
@@ -188,7 +178,17 @@ class SyntheticNpyDataset(Dataset):
             db_level_range=self.db_level_range,
             db_variation_scale=self.db_variation_scale,
         )
-        x = torch.from_numpy(feature).float()
+
+    def __len__(self) -> int:
+        return len(self.x_files)
+
+    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
+        signal = np.load(self.x_files[index]).astype(np.float32, copy=False)
+        label = np.load(self.y_files[index]).astype(np.float32, copy=False)
+        return self._to_tensors(signal, label)
+
+    def _to_tensors(self, signal: np.ndarray, label: np.ndarray) -> tuple[torch.Tensor, torch.Tensor]:
+        x = preprocess_signal(signal, self.preprocess_config).input_tensor
         y = torch.from_numpy(label).float()
         return x, y
 
@@ -335,20 +335,7 @@ class RealCsvDataset(SyntheticNpyDataset):
                 return np.load(cache_path).astype(np.float32, copy=False)
 
         signal = read_signal_csv(csv_path)
-        signal = fix_model_signal_length(signal, self.signal_length, self.input_representation)
-        feature = compute_model_feature(
-            signal,
-            sample_rate=self.sample_rate,
-            nperseg=self.nperseg,
-            noverlap=self.noverlap,
-            target_freq_bins=self.target_freq_bins,
-            target_time_bins=self.target_time_bins,
-            magnitude_scale=self.magnitude_scale,
-            input_representation=self.input_representation,
-            signal_normalization=self.signal_normalization,
-            db_level_range=self.db_level_range,
-            db_variation_scale=self.db_variation_scale,
-        )
+        feature = preprocess_signal(signal, self.preprocess_config).input_tensor.numpy()
 
         if self.cache_enabled:
             cache_path = self._cache_path(relative_file)

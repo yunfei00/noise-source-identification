@@ -3,8 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import re
+from typing import Any
 
 import numpy as np
+import torch
 from scipy.signal import stft
 
 
@@ -27,6 +29,84 @@ class SignalCsvInfo:
     discarded_nonfinite_count: int
 
 
+@dataclass(frozen=True)
+class CsvSignal:
+    """Signal samples and the CSV decisions that produced them.
+
+    ``load_csv_signal`` is the common parser used by strict single-file
+    inference and by the training/validation compatibility wrapper.  Strict
+    inference requires an explicit DATA marker; legacy project datasets can
+    opt in to the historical header-based layout.
+    """
+
+    csv_path: Path
+    metadata_rows: list[list[str]]
+    data_rows: list[list[str]]
+    raw_signal: np.ndarray
+    data_start_line: int
+    selected_columns: list[int]
+    encoding: str
+    delimiter: str
+    found_data_line: bool
+    data_marker_line: int | None
+    numeric_value_count: int
+    discarded_nonfinite_count: int
+    skipped_empty_rows: int
+    skipped_invalid_rows: int
+    parser_mode: str
+
+
+@dataclass(frozen=True)
+class PreprocessConfig:
+    """All deterministic parameters needed to reproduce a model input."""
+
+    signal_length: int = 4096
+    sample_rate: int = 1_000_000
+    nperseg: int = 256
+    noverlap: int = 128
+    target_freq_bins: int = 128
+    target_time_bins: int = 64
+    magnitude_scale: str = "log1p"
+    input_representation: str = "single"
+    signal_normalization: str = "standardize"
+    db_level_range: tuple[float, float] = (-110.0, -50.0)
+    db_variation_scale: float = 15.0
+
+    @classmethod
+    def from_config(cls, config: dict[str, Any]) -> "PreprocessConfig":
+        data_config = config.get("data", {})
+        stft_config = config.get("stft", {})
+        preprocessing_config = config.get("preprocessing", {})
+        db_level_range = stft_config.get("db_level_range", [-110.0, -50.0])
+        if not isinstance(db_level_range, (list, tuple)) or len(db_level_range) != 2:
+            raise ValueError("stft.db_level_range must contain exactly two values")
+        return cls(
+            signal_length=int(data_config.get("signal_length", 4096)),
+            sample_rate=int(data_config.get("sample_rate", 1_000_000)),
+            nperseg=int(stft_config.get("nperseg", 256)),
+            noverlap=int(stft_config.get("noverlap", 128)),
+            target_freq_bins=int(stft_config.get("target_freq_bins", 128)),
+            target_time_bins=int(stft_config.get("target_time_bins", 64)),
+            magnitude_scale=str(stft_config.get("magnitude_scale", "log1p")),
+            input_representation=str(stft_config.get("input_representation", "single")),
+            signal_normalization=str(preprocessing_config.get("signal_normalization", "standardize")),
+            db_level_range=(float(db_level_range[0]), float(db_level_range[1])),
+            db_variation_scale=float(stft_config.get("db_variation_scale", 15.0)),
+        )
+
+
+@dataclass(frozen=True)
+class PreprocessResult:
+    """Deterministic preprocessing output plus contract-report statistics."""
+
+    raw_signal: np.ndarray
+    linear_signal: np.ndarray | None
+    resized_signal: np.ndarray
+    normalized_signal: np.ndarray
+    input_tensor: torch.Tensor
+    statistics: dict[str, Any]
+
+
 def _split_numeric_tokens(line: str) -> list[str]:
     return [token for token in _TOKEN_SPLIT_RE.split(line.strip()) if token]
 
@@ -38,13 +118,25 @@ def _parse_float(token: str) -> float | None:
         return None
 
 
-def _finite_float32_values(values: list[float], csv_path: Path) -> np.ndarray:
-    array = np.asarray(values, dtype=np.float64)
-    if array.size:
-        array = array[np.isfinite(array)]
-    if array.size == 0:
-        raise ValueError(f"No valid numeric samples found in {csv_path}")
-    return array.astype(np.float32, copy=False)
+def _read_text_lines(csv_path: Path) -> tuple[list[str], str]:
+    last_error: UnicodeDecodeError | None = None
+    for encoding in ("utf-8-sig", "gb18030"):
+        try:
+            return csv_path.read_text(encoding=encoding).splitlines(), encoding
+        except UnicodeDecodeError as exc:
+            last_error = exc
+    assert last_error is not None
+    raise ValueError(
+        f"Unable to decode CSV as UTF-8 or GB18030: {csv_path}: {last_error}"
+    ) from last_error
+
+
+def _detected_delimiter(line: str) -> str:
+    if "," in line:
+        return "comma"
+    if "\t" in line:
+        return "tab"
+    return "whitespace"
 
 
 def _find_data_line(lines: list[str]) -> int | None:
@@ -54,35 +146,150 @@ def _find_data_line(lines: list[str]) -> int | None:
     return None
 
 
-def _parse_data_section(lines: list[str], start_index: int) -> list[float]:
-    values: list[float] = []
-    for line in lines[start_index:]:
-        if not line.strip():
-            continue
-        tokens = _split_numeric_tokens(line)
-        if not tokens:
-            continue
-        value_token = tokens[1] if len(tokens) >= 2 else tokens[0]
-        value = _parse_float(value_token)
-        if value is None:
-            continue
-        values.append(value)
-    return values
+def load_csv_signal(
+    path: str | Path,
+    *,
+    require_data_marker: bool = True,
+    invalid_row_policy: str = "error",
+) -> CsvSignal:
+    """Parse the model signal column from a CSV-like instrument export.
 
+    DATA matching follows the historical project rule: the complete stripped
+    line must equal ``DATA`` case-insensitively.  Data starts on the next line,
+    uses column index 1, skips empty lines, and continues to EOF.  In strict
+    mode malformed, short, missing, NaN, or infinite rows fail immediately so
+    an anomalous value cannot silently change the sample length.
 
-def _parse_legacy_rows(lines: list[str]) -> list[float]:
+    ``require_data_marker=False`` is the explicit compatibility mode for the
+    repository's older ``time,value`` files.  It retains their historical
+    last-column parsing behavior.
+    """
+    csv_path = Path(path)
+    if not csv_path.exists():
+        raise FileNotFoundError(f"CSV file not found: {csv_path}")
+    if not csv_path.is_file():
+        raise ValueError(f"Expected a CSV file, got: {csv_path}")
+    if invalid_row_policy not in {"error", "skip"}:
+        raise ValueError(
+            f"invalid_row_policy must be 'error' or 'skip', got {invalid_row_policy}"
+        )
+
+    try:
+        lines, encoding = _read_text_lines(csv_path)
+    except Exception as exc:
+        if isinstance(exc, ValueError):
+            raise
+        raise ValueError(f"Failed to read CSV file {csv_path}: {exc}") from exc
+
+    data_line_index = _find_data_line(lines)
+    if data_line_index is None and require_data_marker:
+        raise ValueError(
+            "未找到 DATA 数据段，无法执行推理。\n"
+            f"文件：{csv_path}"
+        )
+
     values: list[float] = []
-    for line in lines:
-        if not line.strip():
-            continue
-        tokens = _split_numeric_tokens(line)
-        if not tokens:
-            continue
-        value = _parse_float(tokens[-1])
-        if value is None:
-            continue
-        values.append(value)
-    return values
+    data_rows: list[list[str]] = []
+    skipped_empty_rows = 0
+    skipped_invalid_rows = 0
+    discarded_nonfinite_count = 0
+
+    if data_line_index is not None:
+        metadata_lines = lines[:data_line_index]
+        candidate_lines = lines[data_line_index + 1 :]
+        data_start_line = data_line_index + 2
+        parser_mode = "data_section"
+        selected_columns = [1]
+        metadata_rows = [_split_numeric_tokens(line) for line in metadata_lines]
+        delimiter = next(
+            (_detected_delimiter(line) for line in candidate_lines if line.strip()),
+            "unknown",
+        )
+        for zero_based_offset, line in enumerate(candidate_lines):
+            line_number = data_start_line + zero_based_offset
+            if not line.strip():
+                skipped_empty_rows += 1
+                continue
+            tokens = _split_numeric_tokens(line)
+            if len(tokens) < 2:
+                message = (
+                    f"DATA row {line_number} has {len(tokens)} column(s); "
+                    f"column index 1 is required: {csv_path}"
+                )
+                if invalid_row_policy == "error":
+                    raise ValueError(message)
+                skipped_invalid_rows += 1
+                continue
+            value = _parse_float(tokens[1])
+            if value is None:
+                message = (
+                    f"DATA row {line_number} column 1 is not numeric "
+                    f"({tokens[1]!r}): {csv_path}"
+                )
+                if invalid_row_policy == "error":
+                    raise ValueError(message)
+                skipped_invalid_rows += 1
+                continue
+            if not np.isfinite(value):
+                discarded_nonfinite_count += 1
+                message = (
+                    f"DATA row {line_number} column 1 is not finite "
+                    f"({tokens[1]!r}): {csv_path}"
+                )
+                if invalid_row_policy == "error":
+                    raise ValueError(message)
+                continue
+            data_rows.append(tokens)
+            values.append(value)
+    else:
+        # Historical repository data has an optional header and no DATA marker.
+        metadata_rows = []
+        data_start_line = 1
+        parser_mode = "legacy_last_column"
+        selected_columns = [-1]
+        delimiter = next(
+            (_detected_delimiter(line) for line in lines if line.strip()),
+            "unknown",
+        )
+        for line_number, line in enumerate(lines, start=1):
+            if not line.strip():
+                skipped_empty_rows += 1
+                continue
+            tokens = _split_numeric_tokens(line)
+            if not tokens:
+                skipped_empty_rows += 1
+                continue
+            value = _parse_float(tokens[-1])
+            if value is None:
+                metadata_rows.append(tokens)
+                skipped_invalid_rows += 1
+                continue
+            if not np.isfinite(value):
+                discarded_nonfinite_count += 1
+                continue
+            data_rows.append(tokens)
+            values.append(value)
+
+    if not values:
+        raise ValueError(f"No valid numeric samples found in {csv_path}")
+    raw_signal = np.asarray(values, dtype=np.float32)
+    return CsvSignal(
+        csv_path=csv_path,
+        metadata_rows=metadata_rows,
+        data_rows=data_rows,
+        raw_signal=raw_signal,
+        data_start_line=data_start_line,
+        selected_columns=selected_columns,
+        encoding=encoding,
+        delimiter=delimiter,
+        found_data_line=data_line_index is not None,
+        data_marker_line=(data_line_index + 1) if data_line_index is not None else None,
+        numeric_value_count=len(values),
+        discarded_nonfinite_count=discarded_nonfinite_count,
+        skipped_empty_rows=skipped_empty_rows,
+        skipped_invalid_rows=skipped_invalid_rows,
+        parser_mode=parser_mode,
+    )
 
 
 def read_signal_csv_info(path: str | Path) -> SignalCsvInfo:
@@ -98,37 +305,17 @@ def read_signal_csv_info(path: str | Path) -> SignalCsvInfo:
     or two-column ``time,value`` parsing, with optional headers skipped and the
     last numeric column used as the signal value.
     """
-    csv_path = Path(path)
-    if not csv_path.exists():
-        raise FileNotFoundError(f"CSV file not found: {csv_path}")
-    if not csv_path.is_file():
-        raise ValueError(f"Expected a CSV file, got: {csv_path}")
-
-    try:
-        lines = csv_path.read_text(encoding="utf-8-sig", errors="replace").splitlines()
-    except Exception as exc:
-        raise ValueError(f"Failed to read CSV file {csv_path}: {exc}") from exc
-
-    data_line_index = _find_data_line(lines)
-    if data_line_index is not None:
-        values = _parse_data_section(lines, data_line_index + 1)
-        array = _finite_float32_values(values, csv_path)
-        return SignalCsvInfo(
-            values=array,
-            found_data_line=True,
-            data_line_number=data_line_index + 1,
-            numeric_value_count=len(values),
-            discarded_nonfinite_count=sum(not np.isfinite(value) for value in values),
-        )
-
-    values = _parse_legacy_rows(lines)
-    array = _finite_float32_values(values, csv_path)
+    parsed = load_csv_signal(
+        path,
+        require_data_marker=False,
+        invalid_row_policy="skip",
+    )
     return SignalCsvInfo(
-        values=array,
-        found_data_line=False,
-        data_line_number=None,
-        numeric_value_count=len(values),
-        discarded_nonfinite_count=sum(not np.isfinite(value) for value in values),
+        values=parsed.raw_signal,
+        found_data_line=parsed.found_data_line,
+        data_line_number=parsed.data_marker_line,
+        numeric_value_count=parsed.numeric_value_count + parsed.discarded_nonfinite_count,
+        discarded_nonfinite_count=parsed.discarded_nonfinite_count,
     )
 
 
@@ -145,7 +332,127 @@ def read_signal_csv(path: str | Path) -> np.ndarray:
     - time,value
     - either layout with or without a header row
     """
-    return read_signal_csv_info(path).values
+    return load_csv_signal(
+        path,
+        require_data_marker=False,
+        invalid_row_policy="error",
+    ).raw_signal
+
+
+def _finite_range(values: np.ndarray) -> list[float] | None:
+    finite = np.asarray(values)[np.isfinite(values)]
+    if finite.size == 0:
+        return None
+    return [float(np.min(finite)), float(np.max(finite))]
+
+
+def preprocess_signal(
+    raw_signal: np.ndarray,
+    config: PreprocessConfig,
+) -> PreprocessResult:
+    """Apply the exact deterministic feature path shared by datasets/inference."""
+    raw = np.asarray(raw_signal, dtype=np.float32).reshape(-1)
+    if raw.size == 0:
+        raise ValueError("Cannot preprocess an empty signal")
+    representation = config.input_representation.strip().lower()
+    finite_raw = raw[np.isfinite(raw)]
+    if finite_raw.size == 0:
+        raise ValueError("Signal contains no finite samples")
+
+    original_length = int(raw.size)
+    target_length = int(config.signal_length)
+    if original_length < target_length:
+        length_method = "right_pad"
+        crop_start = None
+        pad_value = float(np.median(finite_raw)) if representation == "db_trace" else 0.0
+    elif original_length > target_length:
+        length_method = "center_crop"
+        crop_start = (original_length - target_length) // 2
+        pad_value = None
+    else:
+        length_method = "unchanged"
+        crop_start = None
+        pad_value = None
+
+    resized = fix_model_signal_length(raw, target_length, representation)
+    if representation == "db_trace":
+        # db_trace intentionally stays in dB. prepare_db_trace_channels removes
+        # the per-trace median before STFT and encodes level/variation separately.
+        normalized = resized.astype(np.float32, copy=False)
+        normalization_method = "none (dB trace median-centering occurs inside feature extraction)"
+        normalization_parameters: dict[str, float] = {
+            "median_db": float(np.median(resized[np.isfinite(resized)])),
+            "db_level_min": float(config.db_level_range[0]),
+            "db_level_max": float(config.db_level_range[1]),
+            "db_variation_scale": float(config.db_variation_scale),
+        }
+        uses_training_statistics = False
+    else:
+        normalized = apply_signal_normalization(resized, config.signal_normalization)
+        normalization_method = config.signal_normalization
+        normalization_parameters = {}
+        if config.signal_normalization.strip().lower() in _STANDARDIZE_ALIASES:
+            clean = np.nan_to_num(resized, nan=0.0, posinf=0.0, neginf=0.0)
+            normalization_parameters = {
+                "sample_mean": float(np.mean(clean)),
+                "sample_std": float(np.std(clean)),
+                "epsilon": 1e-8,
+            }
+        uses_training_statistics = False
+
+    feature = compute_model_feature(
+        resized,
+        sample_rate=config.sample_rate,
+        nperseg=config.nperseg,
+        noverlap=config.noverlap,
+        target_freq_bins=config.target_freq_bins,
+        target_time_bins=config.target_time_bins,
+        magnitude_scale=config.magnitude_scale,
+        input_representation=config.input_representation,
+        signal_normalization=config.signal_normalization,
+        db_level_range=config.db_level_range,
+        db_variation_scale=config.db_variation_scale,
+    )
+    sample_tensor = torch.from_numpy(feature).float()
+    statistics: dict[str, Any] = {
+        "raw_shape": list(raw.shape),
+        "raw_range": _finite_range(raw),
+        "linear_conversion_applied": False,
+        "linear_conversion_formula": "not applicable; training keeps the values in their configured representation",
+        "linear_shape": None,
+        "linear_range": None,
+        "original_length": original_length,
+        "target_length": target_length,
+        "length_method": length_method,
+        "crop_start": crop_start,
+        "crop_end": (crop_start + target_length) if crop_start is not None else None,
+        "pad_value": pad_value,
+        "resized_shape": list(resized.shape),
+        "resized_range": _finite_range(resized),
+        "normalization_method": normalization_method,
+        "normalization_parameters": normalization_parameters,
+        "normalization_parameter_source": "current sample" if normalization_parameters else "not applicable",
+        "uses_training_statistics": uses_training_statistics,
+        "normalization_before_range": _finite_range(resized),
+        "normalization_after_range": _finite_range(normalized),
+        "normalized_shape": list(normalized.shape),
+        "feature_shape": list(feature.shape),
+        "sample_tensor_shape": list(sample_tensor.shape),
+        "sample_tensor_dtype": str(sample_tensor.dtype),
+        "input_representation": config.input_representation,
+        "magnitude_scale": config.magnitude_scale,
+        "nan_count_before": int(np.isnan(raw).sum()),
+        "positive_inf_count_before": int(np.isposinf(raw).sum()),
+        "negative_inf_count_before": int(np.isneginf(raw).sum()),
+    }
+    return PreprocessResult(
+        raw_signal=raw,
+        linear_signal=None,
+        resized_signal=resized,
+        normalized_signal=normalized,
+        input_tensor=sample_tensor,
+        statistics=statistics,
+    )
 
 
 def fix_length(

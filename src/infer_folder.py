@@ -13,8 +13,8 @@ import torch
 from sklearn.metrics import precision_recall_fscore_support
 
 from src.features import (
-    compute_model_feature,
-    fix_model_signal_length,
+    PreprocessConfig,
+    preprocess_signal,
     read_signal_csv,
 )
 from src.infer import load_checkpoint
@@ -97,26 +97,16 @@ def find_csv_files(input_dir: str | Path) -> list[Path]:
 
 
 def feature_from_csv(csv_path: Path, data_config: dict, stft_config: dict, preprocessing_config: dict) -> np.ndarray:
-    input_representation = str(stft_config.get("input_representation", "single"))
     signal = read_signal_csv(csv_path)
-    signal = fix_model_signal_length(
+    config = {
+        "data": data_config,
+        "stft": stft_config,
+        "preprocessing": preprocessing_config,
+    }
+    return preprocess_signal(
         signal,
-        int(data_config.get("signal_length", 4096)),
-        input_representation,
-    )
-    return compute_model_feature(
-        signal,
-        sample_rate=int(data_config.get("sample_rate", 1_000_000)),
-        nperseg=int(stft_config.get("nperseg", 256)),
-        noverlap=int(stft_config.get("noverlap", 128)),
-        target_freq_bins=int(stft_config.get("target_freq_bins", 128)),
-        target_time_bins=int(stft_config.get("target_time_bins", 64)),
-        magnitude_scale=str(stft_config.get("magnitude_scale", "log1p")),
-        input_representation=input_representation,
-        signal_normalization=str(preprocessing_config.get("signal_normalization", "standardize")),
-        db_level_range=tuple(stft_config.get("db_level_range", [-110.0, -50.0])),
-        db_variation_scale=float(stft_config.get("db_variation_scale", 15.0)),
-    )
+        PreprocessConfig.from_config(config),
+    ).input_tensor.numpy()
 
 
 def load_model_for_inference(
