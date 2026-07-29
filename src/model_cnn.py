@@ -148,9 +148,31 @@ class NoiseCNN(nn.Module):
         self,
         outputs: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
     ) -> torch.Tensor:
+        """Return genuine per-label probabilities for every prediction mode.
+
+        Structured mode returns label marginals derived from the seven-way
+        combination distribution. Final structured decisions must use
+        ``decoded_labels_from_outputs`` instead of thresholding this tensor.
+        """
+        if self.prediction_mode == "structured":
+            return self.label_marginal_probabilities_from_outputs(outputs)
+        return torch.sigmoid(outputs[0])
+
+    def multilabel_probabilities_from_outputs(
+        self,
+        outputs: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    ) -> torch.Tensor:
+        return torch.sigmoid(outputs[0])
+
+    def decoded_labels_from_outputs(
+        self,
+        outputs: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    ) -> torch.Tensor:
         if self.prediction_mode == "structured":
             return self.structured_predictions(outputs)
-        return torch.sigmoid(outputs[0])
+        raise RuntimeError(
+            "Multilabel decoding requires explicit thresholds and is handled by the runtime"
+        )
 
     def structured_predictions(
         self,
@@ -191,6 +213,19 @@ class NoiseCNN(nn.Module):
         outputs: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
     ) -> torch.Tensor:
         return F.softmax(self.structured_scores(outputs), dim=1)
+
+    def label_marginal_probabilities_from_outputs(
+        self,
+        outputs: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    ) -> torch.Tensor:
+        if not self.auxiliary_heads:
+            raise RuntimeError("Structured label marginals require auxiliary heads")
+        combination_probabilities = self.structured_combo_probabilities(outputs)
+        labels = self.combo_labels.to(
+            device=combination_probabilities.device,
+            dtype=combination_probabilities.dtype,
+        )
+        return combination_probabilities @ labels
 
 
 def build_model(num_classes: int, config: dict) -> NoiseCNN:

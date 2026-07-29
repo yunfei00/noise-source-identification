@@ -19,7 +19,7 @@ from src.features import (
 )
 from src.infer import load_checkpoint
 from src.model_cnn import NoiseCNN, build_model
-from src.train import resolve_device
+from src.noise_source_runtime.device import resolve_device
 
 _SOURCE_NAME_RE = re.compile(r"source_\d+")
 _UNKNOWN_GROUP_PREFIXES = ("unknown", "background")
@@ -139,7 +139,9 @@ def infer_csv_probabilities(
     with torch.no_grad():
         if model.auxiliary_heads and model.prediction_mode == "structured":
             outputs = model.forward_with_auxiliary(x)
-            probabilities = model.probabilities_from_outputs(outputs).squeeze(0).cpu().numpy()
+            # This legacy folder evaluator expects its returned values to also
+            # be final decisions. Keep that behavior explicit.
+            probabilities = model.decoded_labels_from_outputs(outputs).squeeze(0).cpu().numpy()
         else:
             probabilities = torch.sigmoid(model(x)).squeeze(0).cpu().numpy()
     return probabilities.astype(np.float32, copy=False)

@@ -18,7 +18,8 @@ from tqdm.auto import tqdm
 from src.dataset import RealCsvDataset
 from src.infer import load_checkpoint
 from src.model_cnn import build_model
-from src.train import prepare_real_split, resolve_device
+from src.noise_source_runtime.device import resolve_device
+from src.train import prepare_real_split
 
 
 def combo_label_matrix(num_classes: int) -> np.ndarray:

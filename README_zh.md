@@ -167,16 +167,53 @@ python scripts/predict_single_csv.py \
 
 单文件入口要求 CSV 中存在独占一行的 `DATA` 标志，且其后第二列全部为有限数值。模型结构、标签顺序、预处理配置和默认阈值优先从 checkpoint 恢复；只有纯 `state_dict` 没有内嵌训练契约时才必须传 `--config`。`--threshold` 可以是一个统一阈值，也可以是按标签顺序排列的逗号分隔阈值。输出目录包含 `<样本名>_prediction.json` 和 `inference_contract.md`。
 
-未来 GUI 可以直接调用同一个 Python 接口，无需启动外部进程：
+正式 GUI/运行时接口为可安装的 `noise_source_runtime` 包。GUI 应长期持有一个会话，避免每次预测都重新加载 checkpoint：
 
 ```python
-from src.inference import predict_single_csv
-
-result = predict_single_csv(
-    csv_path="path/to/instrument_export.csv",
-    checkpoint_path="outputs/checkpoints/best.pt",
+from noise_source_runtime import (
+    InferenceSession,
+    export_prediction_result,
 )
+
+with InferenceSession.load_model(
+    "outputs/checkpoints/best.pt",
+    device="auto",
+) as session:
+    first = session.predict_file("path/to/first.csv")
+    second = session.predict_file("path/to/second.csv")
+    memory_result = session.predict_array(signal_array)
+
+    # 纯推理默认不写磁盘，需要时再显式导出。
+    exported = export_prediction_result(
+        first,
+        session,
+        "outputs/inference_contract",
+    )
 ```
+
+`structured` 结果严格区分四种语义：
+
+- `multilabel_probabilities`：独立标签 logits 的 sigmoid。
+- `combination_probabilities`：七种合法组合的 softmax，顺序固定为 `001, 010, 011, 100, 101, 110, 111`。
+- `label_marginal_probabilities`：组合概率与组合标签矩阵相乘得到的标签边缘概率；GUI 默认用它显示每个噪声源百分比。
+- `decoded_label_vector`：合法组合概率 argmax 得到的最终标签。structured 模式下阈值不参与最终判定，`thresholds_applicable=false`。
+
+`multilabel` checkpoint 仍使用 sigmoid 加逐标签阈值。原 `src.inference` API 保留为兼容适配层。
+
+构建和校验可版本化模型包：
+
+```bash
+python scripts/build_model_package.py \
+  --checkpoint outputs/checkpoints/best.pt \
+  --version 1.0.0 \
+  --model-name noise-source-production \
+  --output-dir outputs/model-packages/noise-source-production-1.0.0
+
+python scripts/build_model_package.py \
+  --verify outputs/model-packages/noise-source-production-1.0.0
+```
+
+模型包包含 `model.pt`、`manifest.json`、`metrics.json`、`preprocess.json`、`labels.json`、`README.md` 和 `sha256.txt`。新训练 checkpoint 会记录 schema/runtime 版本、预处理契约、创建时间、预测模式、训练 Git commit、监控指标、最佳指标及标签顺序；旧 checkpoint 仍可加载。
 
 对一个没有真实标签、目录层级任意的文件夹递归推理并统计分布：
 

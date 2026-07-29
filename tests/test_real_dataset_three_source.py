@@ -454,7 +454,7 @@ class ThreeSourceRealDatasetTest(unittest.TestCase):
         combo_logits[0, 5] = 10.0  # Binary value 110 maps to class index 5.
         count_logits = torch.tensor([[-10.0, 10.0, -10.0]])
 
-        prediction = model.probabilities_from_outputs(
+        prediction = model.decoded_labels_from_outputs(
             (multilabel_logits, combo_logits, count_logits)
         )
 

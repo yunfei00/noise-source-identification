@@ -4,8 +4,11 @@ import argparse
 import csv
 import json
 from collections import Counter
+from datetime import datetime, timezone
+from functools import lru_cache
 import random
 from pathlib import Path
+import subprocess
 from time import perf_counter
 
 import numpy as np
@@ -23,6 +26,10 @@ from src.build_real_index import build_real_index, discover_class_names
 from src.create_balanced_split import create_balanced_split
 from src.dataset import RealCsvDataset, SyntheticNpyDataset
 from src.model_cnn import build_model
+from src.noise_source_runtime import RUNTIME_VERSION
+from src.noise_source_runtime.checkpoint import safe_metadata
+from src.noise_source_runtime.device import resolve_device
+from src.noise_source_runtime.preprocessing import preprocessing_contract
 from src.split_real_dataset import split_real_dataset
 
 DEFAULT_CLASS_NAMES = ["source_1", "source_3", "source_5"]
@@ -45,15 +52,6 @@ def set_seed(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-
-
-def resolve_device(device_name: str) -> torch.device:
-    if device_name == "auto":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    device = torch.device(device_name)
-    if device.type == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA was requested, but torch.cuda.is_available() is False")
-    return device
 
 
 def _configured_class_names(config: dict | None) -> list[str] | None:
@@ -695,7 +693,9 @@ def run_epoch(
                 outputs = model.forward_with_auxiliary(x)
                 logits = outputs[0]
                 loss = criterion(outputs, y)
-                batch_probs = model.probabilities_from_outputs(outputs)
+                # Preserve structured validation semantics: the final label is
+                # the legal-combination argmax, never a thresholded marginal.
+                batch_probs = model.decoded_labels_from_outputs(outputs)
             else:
                 logits = model(x)
                 loss = criterion(logits, y)
@@ -808,6 +808,22 @@ def save_training_history(path: str | Path, history: list[dict[str, float | int]
         writer.writerows(history)
 
 
+@lru_cache(maxsize=1)
+def training_git_commit() -> str:
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        commit = completed.stdout.strip()
+        return commit if commit else "unknown"
+    except Exception:
+        return "unknown"
+
+
 def save_checkpoint(
     path: str | Path,
     model: nn.Module,
@@ -815,13 +831,26 @@ def save_checkpoint(
     config: dict,
     epoch: int,
     best_metric: float,
+    monitor_name: str = "unknown",
 ) -> None:
+    prediction_mode = str(
+        config.get("model", {}).get("prediction", {}).get("mode", "multilabel")
+    )
+    threshold = config.get("train", {}).get("threshold", 0.5)
     checkpoint = {
+        "checkpoint_schema_version": "2.0",
+        "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "prediction_mode": prediction_mode,
+        "preprocessing_contract": preprocessing_contract(config),
+        "runtime_version": RUNTIME_VERSION,
+        "training_git_commit": training_git_commit(),
+        "monitor_name": str(monitor_name),
         "model_state": model.state_dict(),
-        "class_names": class_names,
-        "config": config,
-        "epoch": epoch,
-        "best_metric": best_metric,
+        "class_names": safe_metadata(class_names),
+        "config": safe_metadata(config),
+        "epoch": int(epoch),
+        "best_metric": float(best_metric),
+        "threshold": safe_metadata(threshold),
     }
     torch.save(checkpoint, Path(path))
 
@@ -1030,6 +1059,7 @@ def train(config: dict, init_model: str | Path | None = None) -> None:
                 config,
                 epoch,
                 best_metric,
+                monitor,
             )
 
         if scheduler is not None:
@@ -1043,6 +1073,7 @@ def train(config: dict, init_model: str | Path | None = None) -> None:
             config,
             epoch,
             best_metric,
+            monitor,
         )
 
         history.append(

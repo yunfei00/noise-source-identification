@@ -12,7 +12,7 @@ from src.features import (
     read_signal_csv,
 )
 from src.model_cnn import build_model
-from src.train import resolve_device
+from src.noise_source_runtime.device import resolve_device
 
 
 def load_checkpoint(path: str | Path, map_location: torch.device) -> dict:

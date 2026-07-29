@@ -14,7 +14,8 @@ from torch.utils.data import DataLoader
 from src.dataset import RealCsvDataset
 from src.infer import load_checkpoint
 from src.model_cnn import build_model
-from src.train import make_loader, prepare_real_split, resolve_device
+from src.noise_source_runtime.device import resolve_device
+from src.train import make_loader, prepare_real_split
 
 DEFAULT_THRESHOLDS = (0.3, 0.4, 0.5, 0.6, 0.7)
 EXPECTED_LABELS = (
@@ -103,7 +104,9 @@ def collect_probabilities(
                 model, "prediction_mode", "multilabel"
             ) == "structured":
                 outputs = model.forward_with_auxiliary(x)
-                probabilities = model.probabilities_from_outputs(outputs)
+                # Evaluation metrics for structured checkpoints use the final
+                # legal-combination decode, preserving historical behavior.
+                probabilities = model.decoded_labels_from_outputs(outputs)
             else:
                 probabilities = torch.sigmoid(model(x))
             all_probs.append(probabilities.cpu().numpy())

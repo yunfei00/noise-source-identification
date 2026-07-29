@@ -12,7 +12,7 @@ import torch
 
 from src.infer_folder import feature_from_csv, load_model_for_inference
 from src.model_cnn import NoiseCNN
-from src.train import resolve_device
+from src.noise_source_runtime.device import resolve_device
 
 
 DEFAULT_OUTPUT = Path("outputs/reports/metadata_inference.csv")

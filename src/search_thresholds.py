@@ -12,7 +12,8 @@ import torch
 from src.evaluate import collect_probabilities, compute_metrics, compute_group_accuracy, predictions_at_threshold, thresholds_for_report, _real_loader_and_groups
 from src.infer import load_checkpoint
 from src.model_cnn import build_model
-from src.train import make_loader, resolve_device
+from src.noise_source_runtime.device import resolve_device
+from src.train import make_loader
 
 METRIC_KEYS = ("exact_match", "micro_f1", "macro_f1", "sample_f1")
 

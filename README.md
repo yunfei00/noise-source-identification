@@ -205,16 +205,62 @@ required only when a pure state dict has no embedded training contract.
 The output directory receives `<sample>_prediction.json` and
 `inference_contract.md`.
 
-GUI or other Python code can call the same implementation directly:
+The stable GUI/runtime API is the installable `noise_source_runtime` package.
+Keep one session alive to avoid reloading the checkpoint for every file:
 
 ```python
-from src.inference import predict_single_csv
-
-result = predict_single_csv(
-    csv_path="path/to/instrument_export.csv",
-    checkpoint_path="outputs/checkpoints/best.pt",
+from noise_source_runtime import (
+    InferenceSession,
+    export_prediction_result,
 )
+
+with InferenceSession.load_model(
+    "outputs/checkpoints/best.pt",
+    device="auto",
+) as session:
+    first = session.predict_file("path/to/first.csv")
+    second = session.predict_file("path/to/second.csv")
+    memory_result = session.predict_array(signal_array)
+
+    # Pure prediction writes nothing. Export only when explicitly requested.
+    exported = export_prediction_result(
+        first,
+        session,
+        "outputs/inference_contract",
+    )
 ```
+
+`structured` results keep four distinct concepts:
+
+- `multilabel_probabilities`: sigmoid of the independent source logits.
+- `combination_probabilities`: softmax over the seven legal combinations,
+  ordered `001, 010, 011, 100, 101, 110, 111`.
+- `label_marginal_probabilities`: combination probabilities multiplied by the
+  combination-label matrix; this is the GUI's default per-source percentage.
+- `decoded_label_vector`: the combination argmax. Thresholds are not used for
+  the final structured decision (`thresholds_applicable=false`).
+
+`multilabel` checkpoints continue to use sigmoid plus explicit per-label
+thresholds. The old `src.inference` API remains as a compatibility wrapper.
+
+Build and verify a versioned model package:
+
+```bash
+python scripts/build_model_package.py \
+  --checkpoint outputs/checkpoints/best.pt \
+  --version 1.0.0 \
+  --model-name noise-source-production \
+  --output-dir outputs/model-packages/noise-source-production-1.0.0
+
+python scripts/build_model_package.py \
+  --verify outputs/model-packages/noise-source-production-1.0.0
+```
+
+The package contains `model.pt`, `manifest.json`, `metrics.json`,
+`preprocess.json`, `labels.json`, `README.md`, and `sha256.txt`. New training
+checkpoints include schema/runtime versions, preprocessing contract, creation
+time, prediction mode, training commit, monitor, best metric, and label order;
+legacy checkpoints remain loadable.
 
 For recursively inferring an arbitrarily nested, unlabeled metadata folder and reporting prediction distributions:
 

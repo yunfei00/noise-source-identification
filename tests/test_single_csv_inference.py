@@ -286,7 +286,7 @@ class CheckpointContractTest(unittest.TestCase):
             torch.save(model.state_dict(), checkpoint)
             csv_path.write_text(csv_text([1.0, 2.0, 3.0]), encoding="utf-8")
 
-            with self.assertRaisesRegex(SingleCsvInferenceError, "missing the model/preprocessing config"):
+            with self.assertRaisesRegex(SingleCsvInferenceError, "missing model/preprocessing config"):
                 predict_single_csv(
                     csv_path,
                     checkpoint,
@@ -419,10 +419,15 @@ class EndToEndSingleCsvTest(unittest.TestCase):
             assert result.auxiliary_logits is not None
             self.assertEqual(len(result.auxiliary_logits["combination_logits"]), 7)
             self.assertEqual(len(result.auxiliary_logits["count_logits"]), 3)
-            self.assertTrue(all(value in {0.0, 1.0} for value in result.probabilities))
+            self.assertTrue(
+                all(0.0 <= value <= 1.0 for value in result.probabilities)
+            )
+            self.assertFalse(
+                all(value in {0.0, 1.0} for value in result.probabilities)
+            )
             self.assertGreaterEqual(sum(result.binary_prediction), 1)
             report = Path(result.report_path).read_text(encoding="utf-8")
-            self.assertIn("structured combination argmax", report)
+            self.assertIn("七种合法组合概率的 argmax", report)
 
 
 if __name__ == "__main__":
