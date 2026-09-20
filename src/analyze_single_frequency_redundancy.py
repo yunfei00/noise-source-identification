@@ -130,6 +130,95 @@ def _coverage_curve(features: np.ndarray, seed: int) -> dict[str, float]:
     return result
 
 
+
+def _pair_metrics(signals: np.ndarray, seed: int, max_pairs: int = 20000) -> dict[str, float]:
+    n = len(signals)
+    if n < 2:
+        return {}
+    rng = np.random.default_rng(seed)
+    pair_count = min(max_pairs, n * (n - 1) // 2)
+    a = rng.integers(0, n, size=pair_count)
+    b = rng.integers(0, n, size=pair_count)
+    mask = a != b
+    a, b = a[mask], b[mask]
+    x, y = signals[a].astype(np.float64), signals[b].astype(np.float64)
+    diff = x - y
+    rmse = np.sqrt(np.mean(diff * diff, axis=1))
+    mae = np.mean(np.abs(diff), axis=1)
+    dynamic = np.ptp(signals.astype(np.float64), axis=1)
+    scale = max(float(np.median(dynamic)), 1e-12)
+    xc = x - x.mean(axis=1, keepdims=True)
+    yc = y - y.mean(axis=1, keepdims=True)
+    denom = np.linalg.norm(xc, axis=1) * np.linalg.norm(yc, axis=1)
+    corr = np.sum(xc * yc, axis=1) / np.maximum(denom, 1e-12)
+    return {
+        "pair_corr_mean": round(float(np.mean(corr)), 6),
+        "pair_corr_p05": round(float(np.percentile(corr, 5)), 6),
+        "pair_rmse_mean": round(float(np.mean(rmse)), 6),
+        "pair_rmse_p95": round(float(np.percentile(rmse, 95)), 6),
+        "pair_mae_mean": round(float(np.mean(mae)), 6),
+        "pair_nrmse_mean": round(float(np.mean(rmse) / scale), 6),
+        "reference_dynamic_range": round(scale, 6),
+    }
+
+
+def _population_stats(signals: np.ndarray) -> dict[str, float]:
+    x = signals.astype(np.float64)
+    point_std = np.std(x, axis=0)
+    mean_wave = np.mean(x, axis=0)
+    p05 = np.percentile(x, 5, axis=0)
+    p95 = np.percentile(x, 95, axis=0)
+    dynamic = max(float(np.ptp(mean_wave)), 1e-12)
+    return {
+        "point_std_mean": round(float(np.mean(point_std)), 6),
+        "point_std_p95": round(float(np.percentile(point_std, 95)), 6),
+        "p05_p95_band_mean": round(float(np.mean(p95 - p05)), 6),
+        "band_to_mean_wave_range": round(float(np.mean(p95 - p05) / dynamic), 6),
+        "mean_wave_dynamic_range": round(dynamic, 6),
+    }
+
+
+def _spectral_signature(signals: np.ndarray, bins: int = 128) -> np.ndarray:
+    x = signals.astype(np.float64)
+    x = x - x.mean(axis=1, keepdims=True)
+    spec = np.log1p(np.abs(np.fft.rfft(x, axis=1)))
+    edges = np.linspace(0, spec.shape[1], min(bins, spec.shape[1]) + 1, dtype=int)
+    return np.stack([
+        np.array([row[edges[i]:edges[i + 1]].mean() for i in range(len(edges) - 1)])
+        for row in spec
+    ])
+
+
+def _distribution_saturation(signals: np.ndarray, seed: int, repeats: int = 5) -> dict[str, dict[str, float]]:
+    n = len(signals)
+    checkpoints = sorted(set(min(n, x) for x in (100, 200, 500, 1000, 1500, 2000) if min(n, x) < n))
+    if not checkpoints:
+        return {}
+    full = signals.astype(np.float64)
+    full_mean = full.mean(axis=0)
+    full_std = full.std(axis=0)
+    full_spec = _spectral_signature(full).mean(axis=0)
+    value_scale = max(float(np.ptp(full_mean)), float(np.median(np.ptp(full, axis=1))), 1e-12)
+    spec_scale = max(float(np.linalg.norm(full_spec)), 1e-12)
+    rng = np.random.default_rng(seed)
+    result = {}
+    for count in checkpoints:
+        mean_errs, std_errs, spec_errs = [], [], []
+        for _ in range(repeats):
+            idx = rng.choice(n, size=count, replace=False)
+            sub = full[idx]
+            mean_errs.append(float(np.sqrt(np.mean((sub.mean(axis=0) - full_mean) ** 2)) / value_scale))
+            std_errs.append(float(np.mean(np.abs(sub.std(axis=0) - full_std)) / value_scale))
+            sub_spec = _spectral_signature(sub).mean(axis=0)
+            spec_errs.append(float(np.linalg.norm(sub_spec - full_spec) / spec_scale))
+        result[str(count)] = {
+            "mean_wave_nrmse": round(float(np.mean(mean_errs)), 6),
+            "point_std_error": round(float(np.mean(std_errs)), 6),
+            "spectrum_relative_error": round(float(np.mean(spec_errs)), 6),
+        }
+    return result
+
+
 def analyze(input_dir: Path, output_dir: Path, seed: int = 42, feature_bins: int = 128) -> dict[str, Any]:
     files = sorted(p for p in input_dir.rglob("*.csv") if p.is_file())
     if not files:
@@ -181,12 +270,16 @@ def analyze(input_dir: Path, output_dir: Path, seed: int = 42, feature_bins: int
             "ratio_ge_0_999": round(float(np.mean(nearest >= 0.999)), 6),
         },
         **_pca_dimensions(features),
-        "coverage_curve": _coverage_curve(features, seed),
+        "raw_pair_metrics": _pair_metrics(signals, seed),
+        "population_variation": _population_stats(signals),
+        "distribution_saturation": _distribution_saturation(signals, seed),
+        "legacy_coverage_curve": _coverage_curve(features, seed),
         "failed_files": failed,
         "duplicate_groups": duplicate_groups,
         "method_note": (
-            "NumPy-only diagnostic. Similarity uses compact standardized trace + rFFT magnitude features; "
-            "coverage is descriptive, not an automatic sample-count decision."
+            "NumPy-only diagnostic. Primary sample-count guidance should use raw_pair_metrics, "
+            "population_variation and distribution_saturation. legacy_coverage_curve is retained only "
+            "for comparison with earlier reports and should not drive the sample-count decision."
         ),
     }
 
@@ -214,7 +307,19 @@ def analyze(input_dir: Path, output_dir: Path, seed: int = 42, feature_bins: int
         f"pca_dims: 90%={report['pca_dim_90']} "
         f"95%={report['pca_dim_95']} 99%={report['pca_dim_99']}"
     )
-    print("coverage=" + json.dumps(report["coverage_curve"], ensure_ascii=False))
+    pm = report["raw_pair_metrics"]
+    pv = report["population_variation"]
+    print(
+        f"raw_pair: corr_mean={pm.get('pair_corr_mean')} corr_p05={pm.get('pair_corr_p05')} "
+        f"rmse_mean={pm.get('pair_rmse_mean')} nrmse_mean={pm.get('pair_nrmse_mean')}"
+    )
+    print(
+        f"population: point_std_mean={pv.get('point_std_mean')} "
+        f"p05_p95_band_mean={pv.get('p05_p95_band_mean')} "
+        f"band_to_range={pv.get('band_to_mean_wave_range')}"
+    )
+    print("saturation=" + json.dumps(report["distribution_saturation"], ensure_ascii=False))
+    print("legacy_coverage=" + json.dumps(report["legacy_coverage_curve"], ensure_ascii=False))
     print(f"report={report_path.resolve()}")
     print("=======================================")
     return report
