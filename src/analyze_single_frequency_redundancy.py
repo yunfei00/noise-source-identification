@@ -3,12 +3,47 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from src.features import read_signal_csv_info
+_TOKEN_SPLIT_RE = re.compile(r"[,\\s]+")
+
+def _read_signal_csv(path: Path) -> np.ndarray:
+    """Standalone NumPy-only parser; intentionally does not import src.features."""
+    last_error = None
+    lines = None
+    for encoding in ("utf-8-sig", "gb18030"):
+        try:
+            lines = path.read_text(encoding=encoding).splitlines()
+            break
+        except UnicodeDecodeError as exc:
+            last_error = exc
+    if lines is None:
+        raise ValueError(f"Unable to decode CSV: {path}: {last_error}")
+
+    data_index = next(
+        (i for i, line in enumerate(lines) if line.strip().lower() == "data"),
+        None,
+    )
+    candidates = lines[data_index + 1:] if data_index is not None else lines
+    values = []
+    for line in candidates:
+        tokens = [t for t in _TOKEN_SPLIT_RE.split(line.strip()) if t]
+        if not tokens:
+            continue
+        token = tokens[1] if data_index is not None and len(tokens) >= 2 else tokens[-1]
+        try:
+            value = float(token)
+        except ValueError:
+            continue
+        if np.isfinite(value):
+            values.append(value)
+    if not values:
+        raise ValueError(f"No valid numeric samples found in {path}")
+    return np.asarray(values, dtype=np.float32)
 
 
 def _fix_length(x: np.ndarray, length: int) -> np.ndarray:
@@ -106,7 +141,7 @@ def analyze(input_dir: Path, output_dir: Path, seed: int = 42, feature_bins: int
     lengths: list[int] = []
     for path in files:
         try:
-            values = np.asarray(read_signal_csv_info(path).values, dtype=np.float32).reshape(-1)
+            values = _read_signal_csv(path).reshape(-1)
             if values.size == 0 or not np.all(np.isfinite(values)):
                 raise ValueError("empty or non-finite signal")
             parsed.append((path, values))
