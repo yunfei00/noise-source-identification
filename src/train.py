@@ -407,8 +407,7 @@ def prepare_real_split(config: dict, class_names: list[str]) -> Path | None:
     index_path = Path(real_data_config.get("index_file", report_dir / "real_dataset_index.csv"))
     requested_split_path = Path(real_data_config.get("split_file", report_dir / "real_dataset_split.csv"))
 
-    rebuild_real_files = mode == "real_only"
-
+    # An explicitly supplied split is authoritative (e.g. sample-count ablation).\n    # Do not rebuild it in real_only mode, otherwise selected_for_train would be lost.\n    explicit_split = "split_file" in real_data_config\n    if explicit_split and requested_split_path.exists():\n        print(f"using explicit real split file: {requested_split_path}")\n        return requested_split_path\n\n    rebuild_real_files = mode == "real_only"\n
     if rebuild_real_files or not index_path.exists():
         if rebuild_real_files:
             print(f"real_only mode scans all real CSV files; rebuilding {index_path}")
