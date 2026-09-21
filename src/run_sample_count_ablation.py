@@ -50,6 +50,19 @@ def main() -> None:
         print("command=" + subprocess.list2cmdline(cmd))
         if not args.dry_run:
             subprocess.run(cmd, check=True)
+            best_model = Path(cfg["paths"]["checkpoint_dir"]) / "best.pt"
+            if not best_model.exists():
+                raise FileNotFoundError(f"Training finished but best checkpoint is missing: {best_model}")
+            test_report = Path(cfg["paths"]["report_dir"]) / "test_eval_report.json"
+            eval_cmd = [
+                sys.executable, "-m", "src.evaluate",
+                "--model", str(best_model),
+                "--real-split", "test",
+                "--report", str(test_report),
+            ]
+            print(f"\n===== N={count} FIXED TEST =====")
+            print("command=" + subprocess.list2cmdline(eval_cmd))
+            subprocess.run(eval_cmd, check=True)
 
     manifest = args.output_dir / "run_manifest.json"
     manifest.write_text(json.dumps({"configs": generated, "counts": args.counts}, indent=2) + "\n", encoding="utf-8")
