@@ -119,3 +119,55 @@ outputs\ablation_runs\800M\n100\reports\test_eval_report.json
 如果测试正常，后续完整消融 runner 已经支持“训练完成后自动用 best.pt 跑固定 test”，无需再手工逐个执行 evaluate。
 
 > 注意：不要直接重新运行包含 N=100 的完整 runner，避免重复训练已经完成的 N=100。后续实验应从 N=200 开始。
+
+
+## 9. N=100 验证通过后：自动运行剩余四档
+
+N=100 已完成并确认：
+- Best Val Exact Match = 0.9833
+- Best Epoch = 16
+- Fixed Test samples = 900
+- Test micro-F1 = 0.9833
+- Test macro-F1 = 0.9833
+- Test sample-F1 = 0.9833
+- Test Exact Match = 0.9833
+
+因此不要再次训练 N=100。
+
+更新代码后，从 N=200 开始一次性运行剩余四档：
+
+```powershell
+cd D:\code\noise-source-identification
+git switch feature/offline-synthetic-dataset
+git pull --ff-only origin feature/offline-synthetic-dataset
+
+uv run python -m src.run_sample_count_ablation `
+  --split-dir "outputs\reports\ablation_800M" `
+  --counts "200,500,1000,1500" `
+  --output-dir "outputs\ablation_runs\800M"
+```
+
+该命令会依次执行：
+1. N=200：训练 -> 选择 best.pt -> 固定 Test=900
+2. N=500：训练 -> 选择 best.pt -> 固定 Test=900
+3. N=1000：训练 -> 选择 best.pt -> 固定 Test=900
+4. N=1500 档：由于固定 val/test 后每源训练池只有 1400，因此实际使用每源 1400 -> 选择 best.pt -> 固定 Test=900
+
+每一档训练结束后 runner 会自动调用 `src.evaluate --real-split test`，无需手工再运行测试命令。
+
+每档测试报告位置：
+
+```text
+outputs\ablation_runs\800M\n200\reports\test_eval_report.json
+outputs\ablation_runs\800M\n500\reports\test_eval_report.json
+outputs\ablation_runs\800M\n1000\reports\test_eval_report.json
+outputs\ablation_runs\800M\n1500\reports\test_eval_report.json
+```
+
+运行过程中，每档 Test 都应看到：
+
+```text
+split=real_test samples=900
+```
+
+全部完成后，保留各档的 best.pt 和 test_eval_report.json。最终比较 100 / 200 / 500 / 1000 / 1400（1500档实际1400）的固定 Test 指标，再决定推荐采集量。
