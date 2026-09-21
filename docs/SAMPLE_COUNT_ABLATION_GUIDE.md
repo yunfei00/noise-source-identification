@@ -71,3 +71,51 @@ N=1500 因训练池限制实际为每源1400，不会从验证/测试集补数�
 ## 7. 已完成，不要重复
 
 已完成：800M波形差异与饱和度分析；三个source各2000份确认；固定消融划分（每源训练1400/验证300/测试300）；五个消融split生成。正常情况下更新代码后从第3步开始；Dry Run已完成则从第4步开始。
+
+
+## 8. 当前进度：N=100 已训练完成，下一步只跑固定 Test
+
+当前 N=100 已完成训练：
+- 每源训练 100，总训练样本 300。
+- 固定验证集 900。
+- Best Val Exact Match = 0.9833。
+- Best Epoch = 16。
+
+不要重新训练 N=100。先更新代码：
+
+```powershell
+cd D:\code\noise-source-identification
+git switch feature/offline-synthetic-dataset
+git pull --ff-only origin feature/offline-synthetic-dataset
+```
+
+然后只对已经保存的 N=100 best.pt 跑固定测试集：
+
+```powershell
+uv run python -m src.evaluate `
+  --model "outputs\ablation_runs\800M\n100\checkpoints\best.pt" `
+  --real-split test `
+  --report "outputs\ablation_runs\800M\n100\reports\test_eval_report.json"
+```
+
+首先确认输出中有：
+
+```text
+split=real_test samples=900
+```
+
+记录 selected threshold summary 下的 overall 指标：
+- micro_f1
+- macro_f1
+- sample_f1
+- exact_match
+
+测试报告保存在：
+
+```text
+outputs\ablation_runs\800M\n100\reports\test_eval_report.json
+```
+
+如果测试正常，后续完整消融 runner 已经支持“训练完成后自动用 best.pt 跑固定 test”，无需再手工逐个执行 evaluate。
+
+> 注意：不要直接重新运行包含 N=100 的完整 runner，避免重复训练已经完成的 N=100。后续实验应从 N=200 开始。
