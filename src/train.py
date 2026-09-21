@@ -994,8 +994,11 @@ def train(config: dict, init_model: str | Path | None = None) -> None:
 
     synthetic_samples = train_stats["synthetic_samples"] + val_stats["synthetic_samples"]
     total_real_samples = real_counts["total_real_samples"] or train_stats["real_samples"] + val_stats["real_samples"]
-    train_samples = real_counts["train_samples"] or train_stats["real_samples"]
-    val_samples = real_counts["val_samples"] or val_stats["real_samples"]
+    # For ablation splits, the CSV contains the whole train pool while
+    # RealCsvDataset applies selected_for_train. Report the effective dataset
+    # lengths, not the raw number of rows marked split=train.
+    train_samples = train_stats["real_samples"] if mode == "real_only" else (real_counts["train_samples"] or train_stats["real_samples"])
+    val_samples = val_stats["real_samples"] if mode == "real_only" else (real_counts["val_samples"] or val_stats["real_samples"])
     test_samples = real_counts["test_samples"]
     single_samples = real_counts["single_samples"]
     combo_samples = real_counts["combo_samples"]
