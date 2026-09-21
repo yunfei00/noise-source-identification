@@ -213,3 +213,72 @@ split=real_test samples=900
 测试报告分别保存在各自 `nXXX\reports\test_eval_report.json` 中。
 
 注意：这一步只加载现有 best.pt 做测试，不会重新训练模型。
+
+
+## 11. 下一阶段：S2 / S3 数据质量与类间重叠审计
+
+样本量实验完成后，当前主要错误全部集中在 S2 与 S3 相互误判。结合采集现场可能存在“未采上”或“一份数据带多个特征”的情况，下一步先审计数据质量，不继续盲目增加训练样本。
+
+本工具不会删除或修改任何原始 CSV，也不会自动把模型误判等同于脏数据。high / medium 仅表示需要人工复核。
+
+先更新代码：
+
+```powershell
+cd D:\code\noise-source-identification
+git switch feature/offline-synthetic-dataset
+git pull --ff-only origin feature/offline-synthetic-dataset
+```
+
+### 11.1 找到 800M 下 S2、S3 的两个目录
+
+将下面两个路径替换成公司电脑上实际的 S2 和 S3 800M 原始 CSV 目录，然后执行：
+
+```powershell
+uv run python -m src.audit_s2_s3_quality `
+  --s2-dir "这里替换为S2的800M目录" `
+  --s3-dir "这里替换为S3的800M目录" `
+  --output-dir "outputs\reports\s2_s3_audit_800M" `
+  --top 100
+```
+
+该脚本是 NumPy 分析工具，不依赖 PyTorch。
+
+### 11.2 需要反馈的结果
+
+运行结束后，终端会打印：
+
+```text
+S2 files=... risk={'high': ..., 'medium': ..., 'low': ...}
+S3 files=... risk={'high': ..., 'medium': ..., 'low': ...}
+audit_csv=...
+summary=...
+```
+
+先把这两行 risk 数量反馈回来即可，不需要提供公司的原始 CSV。
+
+输出文件：
+
+```text
+outputs\reports\s2_s3_audit_800M\s2_s3_audit.csv
+outputs\reports\s2_s3_audit_800M\summary.json
+```
+
+CSV 中重点字段：
+- own_distance：样本距离自身类别中心的距离；
+- other_distance：样本距离另一类别中心的距离；
+- margin_other_minus_own：正数越大越像自己的类别；负数表示在当前特征空间中反而更接近另一类；
+- high：重点人工复核；
+- medium：边界/类内异常候选；
+- low：典型样本。
+
+### 11.3 当前阶段禁止做的事情
+
+不要因为 risk=high 就删除文件；不要根据模型预测直接改标签；不要重新采集全部数据。
+
+先统计异常规模，再从 high 候选中抽取少量文件回看采集波形。确认究竟属于：
+1. 没有真正采到目标源；
+2. S2/S3 多特征混合；
+3. 正常但处于真实类间边界；
+4. 当前审计特征本身不够好。
+
+完成这一步后，再决定是清洗数据、修改采集方法、修改标签策略，还是调整模型特征。
