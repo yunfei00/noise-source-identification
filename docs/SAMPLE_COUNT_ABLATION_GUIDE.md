@@ -171,3 +171,45 @@ split=real_test samples=900
 ```
 
 全部完成后，保留各档的 best.pt 和 test_eval_report.json。最终比较 100 / 200 / 500 / 1000 / 1400（1500档实际1400）的固定 Test 指标，再决定推荐采集量。
+
+
+## 10. 已完成训练后的固定 Test 补测（不要重新训练）
+
+如果 N=100/200/500/1000/1500 已经全部训练完成，只看到 Best Exact Match / Best Epoch，而没有 `split=real_test samples=900`，不要重新运行训练 runner。
+
+先更新代码：
+
+```powershell
+cd D:\code\noise-source-identification
+git switch feature/offline-synthetic-dataset
+git pull --ff-only origin feature/offline-synthetic-dataset
+```
+
+然后一次性对已经存在的 5 个 best.pt 跑同一个固定 Test=900：
+
+```powershell
+$counts = 100,200,500,1000,1500
+foreach ($n in $counts) {
+    Write-Host "===== N=$n FIXED TEST ====="
+    uv run python -m src.evaluate `
+      --model "outputs\ablation_runs\800M\n$n\checkpoints\best.pt" `
+      --real-split test `
+      --report "outputs\ablation_runs\800M\n$n\reports\test_eval_report.json"
+}
+```
+
+每一档都必须出现：
+
+```text
+split=real_test samples=900
+```
+
+并记录 `selected threshold summary` 中的：
+- micro_f1
+- macro_f1
+- sample_f1
+- exact_match
+
+测试报告分别保存在各自 `nXXX\reports\test_eval_report.json` 中。
+
+注意：这一步只加载现有 best.pt 做测试，不会重新训练模型。
