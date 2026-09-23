@@ -602,3 +602,62 @@ k_neighbors=30
 ```
 
 跑完先停止。不要删除数据，不需要重新训练，也暂时不要跑其他 N。
+
+
+# 16. 只复核 N=1000 的 6 个误判样本（当前下一步）
+
+本节目的不是继续大规模清洗数据，而是只人工确认 CNN 真正误判的 6 个 Test 文件。当前已确认：S1=0 个错误，S2=2 个错误，S3=4 个错误；错误位置为 typical=0、boundary=2、other_dominated=4。
+
+## 16.1 更新代码
+
+```powershell
+cd D:\code\noise-source-identification
+git switch feature/offline-synthetic-dataset
+git pull --ff-only origin feature/offline-synthetic-dataset
+```
+
+## 16.2 重新执行第15节命令
+
+重新运行第15.2节的 N=1000 embedding audit。除原来的完整审计 CSV 外，现在会额外生成：
+
+```text
+outputs\reports\embedding_audit_800M_n1000_fixed\embedding_error_review.csv
+```
+
+该文件应该只有 6 行数据，每行就是一个正式 Test 误判文件，包含：
+- file：原始 CSV 路径
+- group：真实来源
+- true_label / pred_label
+- own_neighbor_fraction
+- embedding_category
+
+**该文件只是人工复核清单，不代表坏数据，不允许自动删除或自动改标签。**
+
+## 16.3 人工只看这 6 个原始 CSV 波形
+
+按 `embedding_error_review.csv` 的 file 路径逐个打开原始 CSV。只需要判断以下三种情况之一：
+
+1. **正常且有明显有效信息**：记为 `正常`。
+2. **明显采集异常/基本无有效信息**：记为 `疑似采集异常`。
+3. **有有效信息，但肉眼与另一类非常接近/无法判断**：记为 `S2/S3相似`。
+
+不要因为模型预测错了就删除文件。
+
+## 16.4 回报格式
+
+检查完只需要告诉我：
+
+```text
+6个文件检查结果：
+正常 = ?
+疑似采集异常 = ?
+S2/S3相似 = ?
+
+如果有疑似采集异常：
+文件1：...
+文件2：...
+```
+
+如果 6 个都属于正常或 S2/S3 相似，则这一轮不再继续清洗数据，进入单源采样量结论和离线复合数据设计阶段。
+
+如果确实发现采集异常，也先不要删除；先记录文件名，再判断是否需要按明确的采集质量规则处理。
