@@ -479,3 +479,57 @@ k_neighbors=30 parse_errors=...
 2. 前面固定 Test 中 S2↔S3 的 6～8 个错误；
 
 决定是否需要把模型误判文件与 V2 审计结果自动交叉匹配。只有确认交叉关系后，才决定是否人工复核少量原始 CSV。
+
+
+# 14. CNN Embedding × Test 误判交叉审计（当前执行步骤）
+
+> 第13节手工特征 V2 得到 S2 几乎全部 other_dominated，与 CNN 在固定 Test 上约 99% 的实际分类能力矛盾。因此第13节结果只作为“手工特征空间不适用”的证据，不用于删数据。本节直接使用已训练 CNN 的 `encode()` 特征空间，并自动把模型真实误判与局部邻域位置交叉。
+
+## 14.1 更新代码
+
+```powershell
+cd D:\code\noise-source-identification
+git switch feature/offline-synthetic-dataset
+git pull --ff-only origin feature/offline-synthetic-dataset
+```
+
+## 14.2 先分析 N=1000（当前错误最少：6）
+
+```powershell
+uv run python -m src.audit_embedding_errors `
+  --model "outputs\ablation_runs\800M\n1000\checkpoints\best.pt" `
+  --split-file "outputs\reports\ablation_800M\real_dataset_split_ablation_1000.csv" `
+  --output-dir "outputs\reports\embedding_audit_800M_n1000" `
+  --neighbors 30
+```
+
+如果你的 split 文件实际名称略有不同，只需要在 `outputs\reports\ablation_800M` 中确认 N=1000 对应的 CSV 文件名；不要改模型或重新训练。
+
+## 14.3 只念最后输出块
+
+```text
+========== READ THIS EMBEDDING AUDIT SUMMARY ==========
+model=best.pt test_samples=900 total_errors=...
+source_1: samples=300 typical=... boundary=... other_dominated=... errors=...
+source_3: samples=300 typical=... boundary=... other_dominated=... errors=...
+source_5: samples=300 typical=... boundary=... other_dominated=... errors=...
+error_locations: typical=... boundary=... other_dominated=...
+confusions: ...
+k_neighbors=30
+========================================================
+```
+
+把这一整块直接口述即可，不需要打开 CSV 或 JSON。
+
+其中：
+- `typical`：CNN embedding 的30个最近邻中，至少80%与自己同类；
+- `boundary`：50%～80%为自己同类；
+- `other_dominated`：不足50%为自己同类；
+- `error_locations`：最关键，直接告诉我们模型真正错的样本落在哪种区域；
+- `confusions`：自动统计真实标签到预测标签的错误方向。
+
+## 14.4 停止点
+
+N=1000 跑完后先停止，把上面的短摘要口述出来。暂时不要跑 N=500/1400，也不要删除任何 CSV。
+
+如果6个错误主要落在 boundary/other_dominated，下一步再自动提取这些少量文件做人工波形复核；如果错误主要落在 typical，则继续分析模型置信度和特征，而不是清洗原始数据。
