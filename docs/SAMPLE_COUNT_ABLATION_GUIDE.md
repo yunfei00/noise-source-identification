@@ -420,3 +420,62 @@ confusions:
 ## 12.6 五档完成后再做数据质量审计
 
 先把五个短摘要口述并完成样本量结论，再进入第 11 节 S2/S3 数据质量与类间重叠审计。不要在五档结果尚未确认前删除任何新的原始数据。
+
+
+# 13. S2 / S3 局部邻域审计 V2（替代旧第 11 节 Risk 结果）
+
+> 旧版第11节出现 S2 high=822、S3 high=3、两类 low=0，说明旧的“类别中心距离”规则过于激进。旧 Risk 结果作废，不据此删除任何文件。本节 V2 使用局部 k 近邻结构，判断典型样本、真实边界、被另一类邻域主导和孤立异常。
+
+## 13.1 更新代码
+
+```powershell
+cd D:\code\noise-source-identification
+git switch feature/offline-synthetic-dataset
+git pull --ff-only origin feature/offline-synthetic-dataset
+```
+
+## 13.2 运行 V2 审计
+
+只需要把两个目录替换成当前 800M 的 S2、S3 原始 CSV 目录：
+
+```powershell
+uv run python -m src.audit_s2_s3_quality `
+  --s2-dir "这里替换为S2的800M目录" `
+  --s3-dir "这里替换为S3的800M目录" `
+  --output-dir "outputs\reports\s2_s3_audit_v2_800M" `
+  --neighbors 30
+```
+
+该工具只依赖 NumPy，不训练模型，不修改原始数据。
+
+## 13.3 只念最后三行数字
+
+运行完成后，无论前面输出多少，只看：
+
+```text
+========== READ THIS S2/S3 AUDIT SUMMARY ==========
+S2 files=2000 typical=... boundary=... other_dominated=... isolated=...
+S3 files=2000 typical=... boundary=... other_dominated=... isolated=...
+k_neighbors=30 parse_errors=...
+====================================================
+```
+
+把这三行数字直接口述即可，不需要打开 JSON/CSV。
+
+含义：
+- `typical`：30个局部邻居中至少80%来自自身类别；
+- `boundary`：自身类别邻居占50%～80%，属于 S2/S3 局部重叠区；
+- `other_dominated`：自身类别邻居不足50%，当前特征空间更被另一类别包围；
+- `isolated`：局部邻域距离超过该类别的保守外围阈值（Q3 + 3×IQR），属于真正值得优先人工复核的孤立候选。
+
+任何类别都只是诊断标签，不能自动删除或改标签。
+
+## 13.4 下一步停止点
+
+得到三行摘要后先停止。不要继续清洗、删除或重新训练。
+
+下一步将根据：
+1. typical / boundary / other_dominated / isolated 的实际比例；
+2. 前面固定 Test 中 S2↔S3 的 6～8 个错误；
+
+决定是否需要把模型误判文件与 V2 审计结果自动交叉匹配。只有确认交叉关系后，才决定是否人工复核少量原始 CSV。
