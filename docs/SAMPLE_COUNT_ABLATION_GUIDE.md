@@ -25,7 +25,8 @@ git log -3 --oneline
 uv run python -m src.create_sample_count_ablation `
   --raw-root "这里替换成800M三个source目录的共同上级目录" `
   --output-dir "outputs\reports\ablation_800M" `
-  --counts "100,200,500,1000,1500"
+  --counts "100,200,500,1000,1500" `
+  --group-label-map "按实际目录名填写，例如 source_1=0,source_3=1,source_5=2"
 ```
 
 当前已确认：每源总数2000，训练池1400，验证300，测试300。原始CSV不移动、不复制、不修改。
@@ -317,7 +318,8 @@ uv run python -m src.create_sample_count_ablation `
   --counts "100,200,500,1000,1500" `
   --val-ratio 0.15 `
   --test-ratio 0.15 `
-  --seed 42
+  --seed 42 `
+  --group-label-map "按实际目录名填写，例如 source_1=0,source_3=1,source_5=2"
 ```
 
 ### 必须先核对
@@ -721,3 +723,12 @@ feature/offline-composite-dataset-v2
 3. 离线生成、固定随机种子、可重复；
 4. manifest 记录每个复合样本的源文件、参数和生成版本；
 5. 在物理混合模型确认前，不开始大规模生成复合训练集。
+
+
+## 17.4 PR 合入前修正
+
+PR #24 自动审查发现两个潜在问题，已在合入前修正：
+- 样本量划分工具不再按目录排序静默推断标签，运行时必须通过 `--group-label-map` 显式声明“原始目录名 → 模型标签索引”；目录集合不完全一致时直接报错，避免生成看似正常但标签错位的实验数据。
+- `train.py` 的显式 split 快捷路径只在 `balanced_train.enabled=false` 时生效；启用 balanced train 时仍执行 quota/balanced split 流程。
+
+本阶段已经完成的 800M 结果不要求重跑；上述修改用于保证以后复现实验和新频点实验不会静默错配标签。
