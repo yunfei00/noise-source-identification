@@ -282,3 +282,141 @@ CSV 中重点字段：
 4. 当前审计特征本身不够好。
 
 完成这一步后，再决定是清洗数据、修改采集方法、修改标签策略，还是调整模型特征。
+
+
+# 12. 800M 清洗后数据：从零完整重跑（当前唯一执行入口）
+
+> 适用场景：三个源都已重新整理为每源 2000 条有效 CSV。旧 outputs 不再使用。本节从清空实验产物开始，一直执行到五档固定 Test。以后本轮实验只按本节操作，不再拼接前面零散命令。
+
+## 12.1 更新代码并清空所有输出
+
+确认当前分支后执行：
+
+```powershell
+cd D:\code\noise-source-identification
+git switch feature/offline-synthetic-dataset
+git pull --ff-only origin feature/offline-synthetic-dataset
+
+if (Test-Path "outputs") {
+    Remove-Item "outputs" -Recurse -Force
+}
+New-Item -ItemType Directory -Path "outputs" | Out-Null
+Write-Host "outputs 已全部清空，本轮实验从零开始。"
+```
+
+这里只删除项目的 `outputs`，绝对不要删除原始 CSV 数据目录。
+
+## 12.2 重新生成固定划分
+
+把下面 `--raw-root` 改成当前 800M 三个源共同的父目录。该父目录下应能发现三个源目录，每源 2000 个 CSV。
+
+```powershell
+uv run python -m src.create_sample_count_ablation `
+  --raw-root "这里替换为800M三个源的共同父目录" `
+  --output-dir "outputs\reports\ablation_800M" `
+  --counts "100,200,500,1000,1500" `
+  --val-ratio 0.15 `
+  --test-ratio 0.15 `
+  --seed 42
+```
+
+### 必须先核对
+
+三个源都应显示：
+- total = 2000；
+- available train = 1400；
+- val = 300；
+- test = 300。
+
+因此固定 Test 总数必须是 900。1500 档因为固定留出验证/测试集，实际最多使用 1400/源。
+
+如果这里不是每源 2000，先停止，不训练。
+
+## 12.3 五档重新训练
+
+```powershell
+uv run python -m src.run_sample_count_ablation `
+  --config "configs\train.yaml" `
+  --split-dir "outputs\reports\ablation_800M" `
+  --counts "100,200,500,1000,1500" `
+  --output-dir "outputs\ablation_runs\800M"
+```
+
+该步骤时间较长。每档会生成独立的 `best.pt`。训练过程中的大量 epoch 日志不需要记录。
+
+如果当前 runner 在训练后自动执行 Test，可以让它完成；无论是否自动 Test，最终都执行下一节的“干净 Test”，以第 12.4 节终端短摘要为最终口述结果。
+
+## 12.4 训练完成后，逐档执行干净 Test
+
+不要把五档 Test 一次粘在一起。一个一个执行，每次只看终端最底部的：
+
+`========== READ THIS TEST SUMMARY ==========`
+
+### N=100
+
+```powershell
+uv run python -m src.evaluate `
+  --model "outputs\ablation_runs\800M\n100\checkpoints\best.pt" `
+  --real-split test `
+  --report "outputs\ablation_runs\800M\n100\reports\test_eval_report.json"
+```
+
+### N=200
+
+```powershell
+uv run python -m src.evaluate `
+  --model "outputs\ablation_runs\800M\n200\checkpoints\best.pt" `
+  --real-split test `
+  --report "outputs\ablation_runs\800M\n200\reports\test_eval_report.json"
+```
+
+### N=500
+
+```powershell
+uv run python -m src.evaluate `
+  --model "outputs\ablation_runs\800M\n500\checkpoints\best.pt" `
+  --real-split test `
+  --report "outputs\ablation_runs\800M\n500\reports\test_eval_report.json"
+```
+
+### N=1000
+
+```powershell
+uv run python -m src.evaluate `
+  --model "outputs\ablation_runs\800M\n1000\checkpoints\best.pt" `
+  --real-split test `
+  --report "outputs\ablation_runs\800M\n1000\reports\test_eval_report.json"
+```
+
+### N=1500（实际最多 1400/源）
+
+```powershell
+uv run python -m src.evaluate `
+  --model "outputs\ablation_runs\800M\n1500\checkpoints\best.pt" `
+  --real-split test `
+  --report "outputs\ablation_runs\800M\n1500\reports\test_eval_report.json"
+```
+
+## 12.5 你只需要念终端最后这一块
+
+新版 `evaluate.py` 会额外打印一个短摘要。前面再多日志都不用看，只看最后：
+
+```text
+========== READ THIS TEST SUMMARY ==========
+samples=900 exact_match=.... macro_f1=....
+source_1: f1=.... acc=....
+source_3: f1=.... acc=....
+source_5: f1=.... acc=....
+total_errors=...
+confusions:
+  [真实标签] -> [预测标签]: 数量
+============================================
+```
+
+每个 N 跑完后，只需要把这一块从上往下念出来。不需要打开 JSON，不需要找 CSV，不需要从长日志中自己统计 S2→S3 / S3→S2。
+
+注意：仓库当前类别名历史上可能显示为 `source_1/source_3/source_5`，而现场口头习惯可能称 S1/S2/S3。以终端打印的 class_names 为准，后续分析时再做对应关系，不要人为改结果。
+
+## 12.6 五档完成后再做数据质量审计
+
+先把五个短摘要口述并完成样本量结论，再进入第 11 节 S2/S3 数据质量与类间重叠审计。不要在五档结果尚未确认前删除任何新的原始数据。
