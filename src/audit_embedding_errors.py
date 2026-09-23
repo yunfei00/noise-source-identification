@@ -173,6 +173,13 @@ def main():
     summary_path = args.output_dir / "embedding_summary.json"
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
+    error_rows = [row for row in rows if not row["exact_match"]]
+    error_review = args.output_dir / "embedding_error_review.csv"
+    with error_review.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(error_rows)
+
     print("\n========== READ THIS EMBEDDING AUDIT SUMMARY ==========")
     print(f"SAFETY_CHECK=PASS evaluate_errors={expected_errors} audit_errors={actual_errors}")
     print(f"model={args.model.name} test_samples={len(rows)} total_errors={actual_errors}")
@@ -194,7 +201,7 @@ def main():
     print(f"k_neighbors={k}")
     print("========================================================")
     print(f"audit_csv={out.resolve()}")
-    print(f"summary={summary_path.resolve()}")
+    print(f"summary={summary_path.resolve()}")\n    print(f"error_review_csv={error_review.resolve()}")
 
 
 if __name__ == "__main__":
