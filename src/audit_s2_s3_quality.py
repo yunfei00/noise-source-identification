@@ -42,38 +42,24 @@ def read_signal(path: Path) -> np.ndarray:
     return np.asarray(vals, dtype=np.float32)
 
 
-def resample(x: np.ndarray, n: int = 256) -> np.ndarray:
+def resample(x: np.ndarray, n: int) -> np.ndarray:
     if len(x) == n:
         return x.astype(np.float32)
-    old = np.linspace(0.0, 1.0, len(x))
-    new = np.linspace(0.0, 1.0, n)
-    return np.interp(new, old, x).astype(np.float32)
+    return np.interp(np.linspace(0, 1, n), np.linspace(0, 1, len(x)), x).astype(np.float32)
 
 
 def feature(x: np.ndarray) -> np.ndarray:
-    y = resample(x)
-    # Preserve absolute/raw-scale information while also capturing shape and spectrum.
-    raw = y
+    y = resample(x, 256)
     centered = y - y.mean()
-    scale = float(np.ptp(y))
-    shape = centered / max(scale, 1e-6)
-    spec = np.log1p(np.abs(np.fft.rfft(centered))).astype(np.float32)
-    spec = resample(spec, 96)
-    stats = np.asarray([
-        y.mean(), y.std(), y.min(), y.max(), np.ptp(y),
-        np.percentile(y, 5), np.percentile(y, 50), np.percentile(y, 95)
-    ], dtype=np.float32)
-    return np.concatenate([raw, shape, spec, stats])
+    dynamic = max(float(np.ptp(y)), 1e-6)
+    shape = centered / dynamic
+    spec = resample(np.log1p(np.abs(np.fft.rfft(centered))).astype(np.float32), 96)
+    stats = np.asarray([y.mean(), y.std(), y.min(), y.max(), np.ptp(y),
+                        np.percentile(y, 5), np.median(y), np.percentile(y, 95)], dtype=np.float32)
+    return np.concatenate([y, shape, spec, stats])
 
 
-def robust_standardize(train: np.ndarray, x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    med = np.median(train, axis=0)
-    mad = np.median(np.abs(train - med), axis=0)
-    scale = np.where(mad > 1e-6, 1.4826 * mad, np.std(train, axis=0) + 1e-6)
-    return (train - med) / scale, (x - med) / scale
-
-
-def load_group(root: Path) -> tuple[list[Path], list[np.ndarray], list[str]]:
+def load_group(root: Path):
     files, feats, errors = [], [], []
     for p in sorted(root.rglob("*.csv")):
         try:
@@ -83,81 +69,112 @@ def load_group(root: Path) -> tuple[list[Path], list[np.ndarray], list[str]]:
             errors.append(f"{p}: {exc}")
     if not feats:
         raise ValueError(f"no valid csv under {root}")
-    return files, feats, errors
+    return files, np.vstack(feats), errors
 
 
-def distances(ref: np.ndarray, x: np.ndarray) -> np.ndarray:
-    return np.sqrt(np.mean((x[:, None, :] - ref[None, :, :]) ** 2, axis=2))
+def robust_z(x: np.ndarray) -> np.ndarray:
+    med = np.median(x, axis=0)
+    mad = np.median(np.abs(x-med), axis=0)
+    scale = np.where(mad > 1e-6, 1.4826*mad, np.std(x, axis=0)+1e-6)
+    z = (x-med)/scale
+    # Prevent a handful of almost-constant dimensions dominating Euclidean distance.
+    return np.clip(z, -8.0, 8.0).astype(np.float32)
 
 
-def main() -> None:
-    p = argparse.ArgumentParser(description="Audit S2/S3 quality and class overlap without torch.")
-    p.add_argument("--s2-dir", type=Path, required=True)
-    p.add_argument("--s3-dir", type=Path, required=True)
-    p.add_argument("--output-dir", type=Path, default=Path("outputs/reports/s2_s3_audit"))
-    p.add_argument("--top", type=int, default=100, help="Number of highest-risk samples to highlight.")
-    args = p.parse_args()
-    args.output_dir.mkdir(parents=True, exist_ok=True)
+def knn_profiles(z: np.ndarray, labels: np.ndarray, k: int, block: int = 128):
+    n = len(z)
+    own_fraction = np.empty(n, dtype=np.float32)
+    kth_distance = np.empty(n, dtype=np.float32)
+    nearest_distance = np.empty(n, dtype=np.float32)
+    for start in range(0, n, block):
+        stop = min(start+block, n)
+        q = z[start:stop]
+        # squared RMS distance; ordering is identical to RMS and avoids a huge 3-D tensor
+        q2 = np.sum(q*q, axis=1, keepdims=True)
+        z2 = np.sum(z*z, axis=1)[None, :]
+        d2 = np.maximum(q2 + z2 - 2.0*(q @ z.T), 0.0) / z.shape[1]
+        for local, global_i in enumerate(range(start, stop)):
+            d2[local, global_i] = np.inf
+        idx = np.argpartition(d2, kth=k-1, axis=1)[:, :k]
+        selected = np.take_along_axis(d2, idx, axis=1)
+        order = np.argsort(selected, axis=1)
+        idx = np.take_along_axis(idx, order, axis=1)
+        selected = np.take_along_axis(selected, order, axis=1)
+        own_fraction[start:stop] = (labels[idx] == labels[start:stop, None]).mean(axis=1)
+        nearest_distance[start:stop] = np.sqrt(selected[:, 0])
+        kth_distance[start:stop] = np.sqrt(selected[:, -1])
+    return own_fraction, nearest_distance, kth_distance
 
-    f2, x2_list, e2 = load_group(args.s2_dir)
-    f3, x3_list, e3 = load_group(args.s3_dir)
-    x2, x3 = np.vstack(x2_list), np.vstack(x3_list)
-    allx = np.vstack([x2, x3])
-    zall, _ = robust_standardize(allx, allx)
-    z2, z3 = zall[:len(x2)], zall[len(x2):]
 
-    # Robust class centers and within-class radii.
-    c2, c3 = np.median(z2, axis=0), np.median(z3, axis=0)
-    d22 = np.sqrt(np.mean((z2-c2)**2, axis=1)); d23 = np.sqrt(np.mean((z2-c3)**2, axis=1))
-    d33 = np.sqrt(np.mean((z3-c3)**2, axis=1)); d32 = np.sqrt(np.mean((z3-c2)**2, axis=1))
-    q2 = float(np.percentile(d22, 95)); q3 = float(np.percentile(d33, 95))
+def classify(own_fraction: np.ndarray, kth_distance: np.ndarray, labels: np.ndarray):
+    # Outlier threshold is learned within each class from local-neighborhood radius.
+    thresholds = {}
+    for label in (0, 1):
+        values = kth_distance[labels == label]
+        q1, q3 = np.percentile(values, [25, 75])
+        thresholds[label] = float(q3 + 3.0*(q3-q1))  # conservative Tukey outer fence
+    categories = []
+    for frac, radius, label in zip(own_fraction, kth_distance, labels):
+        if radius > thresholds[int(label)]:
+            categories.append("isolated_outlier")
+        elif frac < 0.5:
+            categories.append("other_class_dominated")
+        elif frac < 0.8:
+            categories.append("class_boundary")
+        else:
+            categories.append("typical")
+    return categories, thresholds
 
-    rows = []
-    for label, files, own, other, own95 in [
-        ("S2", f2, d22, d23, q2), ("S3", f3, d33, d32, q3)
-    ]:
-        for path, od, xd in zip(files, own, other):
-            margin = float(xd-od)  # positive = closer to own class
-            if od > own95 and xd < od:
-                risk = "high"
-                reason = "own_outlier_and_closer_to_other"
-            elif xd < od:
-                risk = "high"
-                reason = "closer_to_other_class"
-            elif od > own95:
-                risk = "medium"
-                reason = "within_class_outlier"
-            elif margin < 0.15 * max(float(od), 1e-6):
-                risk = "medium"
-                reason = "class_boundary"
-            else:
-                risk = "low"
-                reason = "typical"
-            rows.append({"file":str(path.resolve()),"label":label,"own_distance":float(od),
-                         "other_distance":float(xd),"margin_other_minus_own":margin,
-                         "risk":risk,"reason":reason})
 
-    order={"high":0,"medium":1,"low":2}
-    rows.sort(key=lambda r:(order[r["risk"]], r["margin_other_minus_own"]))
-    out_csv=args.output_dir/"s2_s3_audit.csv"
-    with out_csv.open("w",encoding="utf-8",newline="") as h:
+def main():
+    p=argparse.ArgumentParser(description="Local-neighborhood S2/S3 overlap audit; NumPy only.")
+    p.add_argument("--s2-dir",type=Path,required=True)
+    p.add_argument("--s3-dir",type=Path,required=True)
+    p.add_argument("--output-dir",type=Path,default=Path("outputs/reports/s2_s3_audit_v2"))
+    p.add_argument("--neighbors",type=int,default=30)
+    args=p.parse_args()
+    args.output_dir.mkdir(parents=True,exist_ok=True)
+
+    f2,x2,e2=load_group(args.s2_dir); f3,x3,e3=load_group(args.s3_dir)
+    x=np.vstack([x2,x3]); labels=np.r_[np.zeros(len(x2),dtype=int),np.ones(len(x3),dtype=int)]
+    z=robust_z(x)
+    k=min(args.neighbors,len(z)-1)
+    own,nearest,radius=knn_profiles(z,labels,k)
+    categories,thresholds=classify(own,radius,labels)
+
+    files=f2+f3
+    rows=[]
+    for i,(path,label) in enumerate(zip(files,labels)):
+        rows.append({"file":str(path.resolve()),"label":"S2" if label==0 else "S3",
+                     "category":categories[i],"own_neighbor_fraction":float(own[i]),
+                     "nearest_distance":float(nearest[i]),"kth_neighbor_distance":float(radius[i])})
+    priority={"isolated_outlier":0,"other_class_dominated":1,"class_boundary":2,"typical":3}
+    rows.sort(key=lambda r:(priority[r["category"]],r["own_neighbor_fraction"]))
+    out=args.output_dir/"s2_s3_local_audit.csv"
+    with out.open("w",encoding="utf-8",newline="") as h:
         w=csv.DictWriter(h,fieldnames=list(rows[0])); w.writeheader(); w.writerows(rows)
 
+    cats=("typical","class_boundary","other_class_dominated","isolated_outlier")
     counts={}
     for label in ("S2","S3"):
         rr=[r for r in rows if r["label"]==label]
-        counts[label]={k:sum(r["risk"]==k for r in rr) for k in ("high","medium","low")}
-    top=[r for r in rows if r["risk"]!="low"][:args.top]
-    summary={"s2_files":len(f2),"s3_files":len(f3),"parse_errors":e2+e3,
-             "risk_counts":counts,"s2_own_distance_p95":q2,"s3_own_distance_p95":q3,
-             "top_candidates":top,"method_note":"Candidates are for manual review only; do not auto-delete. Distances combine raw dB scale, shape and spectrum."}
-    (args.output_dir/"summary.json").write_text(json.dumps(summary,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
-    print(f"S2 files={len(f2)} risk={counts['S2']}")
-    print(f"S3 files={len(f3)} risk={counts['S3']}")
-    print(f"audit_csv={out_csv.resolve()}")
-    print(f"summary={(args.output_dir/'summary.json').resolve()}")
-    print("IMPORTANT: high/medium are review candidates, not proof of bad acquisition and must not be auto-deleted.")
+        counts[label]={cat:sum(r["category"]==cat for r in rr) for cat in cats}
+    summary={"s2_files":len(f2),"s3_files":len(f3),"neighbors":k,"counts":counts,
+             "outlier_radius_thresholds":{"S2":thresholds[0],"S3":thresholds[1]},
+             "parse_errors":e2+e3,
+             "method_note":"Local kNN diagnostic. Categories are review aids only; never auto-delete or relabel."}
+    summary_path=args.output_dir/"summary_v2.json"
+    summary_path.write_text(json.dumps(summary,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
+
+    print("\n========== READ THIS S2/S3 AUDIT SUMMARY ==========")
+    print(f"S2 files={len(f2)} typical={counts['S2']['typical']} boundary={counts['S2']['class_boundary']} other_dominated={counts['S2']['other_class_dominated']} isolated={counts['S2']['isolated_outlier']}")
+    print(f"S3 files={len(f3)} typical={counts['S3']['typical']} boundary={counts['S3']['class_boundary']} other_dominated={counts['S3']['other_class_dominated']} isolated={counts['S3']['isolated_outlier']}")
+    print(f"k_neighbors={k} parse_errors={len(e2)+len(e3)}")
+    print("IMPORTANT: boundary/other_dominated/isolated are diagnostic candidates, NOT files to delete.")
+    print("====================================================")
+    print(f"audit_csv={out.resolve()}")
+    print(f"summary={summary_path.resolve()}")
 
 
-if __name__ == "__main__":
+if __name__=="__main__":
     main()
