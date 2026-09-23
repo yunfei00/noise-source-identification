@@ -201,7 +201,8 @@ def main():
     print(f"k_neighbors={k}")
     print("========================================================")
     print(f"audit_csv={out.resolve()}")
-    print(f"summary={summary_path.resolve()}")\n    print(f"error_review_csv={error_review.resolve()}")
+    print(f"summary={summary_path.resolve()}")
+    print(f"error_review_csv={error_review.resolve()}")
 
 
 if __name__ == "__main__":
