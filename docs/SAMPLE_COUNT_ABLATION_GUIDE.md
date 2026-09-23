@@ -533,3 +533,72 @@ k_neighbors=30
 N=1000 跑完后先停止，把上面的短摘要口述出来。暂时不要跑 N=500/1400，也不要删除任何 CSV。
 
 如果6个错误主要落在 boundary/other_dominated，下一步再自动提取这些少量文件做人工波形复核；如果错误主要落在 typical，则继续分析模型置信度和特征，而不是清洗原始数据。
+
+
+# 15. CNN Embedding 审计修正版（替代第14节，当前执行入口）
+
+> 第14节首次运行得到 17 个错误，而正式 N=1000 Test 为 6 个错误。原因是旧审计脚本没有完全复用正式 evaluate 的预测路径。第14节旧结果作废。本节脚本复用 `src.evaluate.collect_probabilities` / threshold 逻辑，并强制读取正式 Test JSON 做自动一致性校验。
+
+## 15.1 更新
+
+```powershell
+cd D:\code\noise-source-identification
+git switch feature/offline-synthetic-dataset
+git pull --ff-only origin feature/offline-synthetic-dataset
+```
+
+## 15.2 运行 N=1000 修正版
+
+使用第12.4节已经生成的正式 N=1000 Test 报告：
+
+```powershell
+uv run python -m src.audit_embedding_errors `
+  --model "outputs\ablation_runs\800M\n1000\checkpoints\best.pt" `
+  --split-file "outputs\reports\ablation_800M\real_dataset_split_ablation_1000.csv" `
+  --eval-report "outputs\ablation_runs\800M\n1000\reports\test_eval_report.json" `
+  --output-dir "outputs\reports\embedding_audit_800M_n1000_fixed" `
+  --neighbors 30
+```
+
+## 15.3 自动安全校验
+
+程序首先核对正式 Test JSON 与当前审计：
+- Test 样本数必须一致；
+- 正式 evaluate 的错误数与 embedding 审计错误数必须一致。
+
+当前 N=1000 正式结果应对应 900 个 Test、6 个错误。这里的“6”不是写死在程序里，而是从 `test_eval_report.json` 自动读取/计算。
+
+如果不一致，程序会直接：
+
+```text
+SAFETY CHECK FAILED
+```
+
+并停止，不允许解释 embedding。
+
+只有看到：
+
+```text
+SAFETY_CHECK=PASS evaluate_errors=6 audit_errors=6
+```
+
+才继续读取下面的结果。
+
+## 15.4 只口述最终摘要
+
+成功时把以下整个短块念出来：
+
+```text
+========== READ THIS EMBEDDING AUDIT SUMMARY ==========
+SAFETY_CHECK=PASS evaluate_errors=6 audit_errors=6
+model=best.pt test_samples=900 total_errors=6
+source_1: ...
+source_3: ...
+source_5: ...
+error_locations: typical=... boundary=... other_dominated=...
+confusions: ...
+k_neighbors=30
+========================================================
+```
+
+跑完先停止。不要删除数据，不需要重新训练，也暂时不要跑其他 N。
