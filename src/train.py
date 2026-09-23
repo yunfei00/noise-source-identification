@@ -407,6 +407,16 @@ def prepare_real_split(config: dict, class_names: list[str]) -> Path | None:
     index_path = Path(real_data_config.get("index_file", report_dir / "real_dataset_index.csv"))
     requested_split_path = Path(real_data_config.get("split_file", report_dir / "real_dataset_split.csv"))
 
+    # An explicitly supplied split is authoritative for ordinary real-only
+    # training (e.g. sample-count ablation), but balanced_train must still be
+    # allowed to derive its quota-controlled split from the requested input.
+    explicit_split = "split_file" in real_data_config
+    balanced_config = config.get("balanced_train", {})
+    balanced_enabled = bool(balanced_config.get("enabled", False))
+    if explicit_split and requested_split_path.exists() and not balanced_enabled:
+        print(f"using explicit real split file: {requested_split_path}")
+        return requested_split_path
+
     rebuild_real_files = mode == "real_only"
 
     if rebuild_real_files or not index_path.exists():
@@ -423,8 +433,6 @@ def prepare_real_split(config: dict, class_names: list[str]) -> Path | None:
             include_combo=True,
         )
 
-    balanced_config = config.get("balanced_train", {})
-    balanced_enabled = bool(balanced_config.get("enabled", False))
     if balanced_enabled:
         quota = balanced_config.get("quota", {})
         if not isinstance(quota, dict) or not quota:
@@ -987,8 +995,11 @@ def train(config: dict, init_model: str | Path | None = None) -> None:
 
     synthetic_samples = train_stats["synthetic_samples"] + val_stats["synthetic_samples"]
     total_real_samples = real_counts["total_real_samples"] or train_stats["real_samples"] + val_stats["real_samples"]
-    train_samples = real_counts["train_samples"] or train_stats["real_samples"]
-    val_samples = real_counts["val_samples"] or val_stats["real_samples"]
+    # For ablation splits, the CSV contains the whole train pool while
+    # RealCsvDataset applies selected_for_train. Report the effective dataset
+    # lengths, not the raw number of rows marked split=train.
+    train_samples = train_stats["real_samples"] if mode == "real_only" else (real_counts["train_samples"] or train_stats["real_samples"])
+    val_samples = val_stats["real_samples"] if mode == "real_only" else (real_counts["val_samples"] or val_stats["real_samples"])
     test_samples = real_counts["test_samples"]
     single_samples = real_counts["single_samples"]
     combo_samples = real_counts["combo_samples"]

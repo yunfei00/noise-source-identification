@@ -744,6 +744,32 @@ def evaluate(
     print(f"error_analysis={error_analysis_path}")
     print(f"combo_confusion={combo_confusion_path}")
     print(f"analysis_110_to_111={analysis_110_to_111_path}")
+
+    # Compact, read-aloud-friendly summary for real single-source ablation tests.
+    if requested_real_split == "test":
+        exact = float(selected_metrics["overall"]["exact_match"])
+        macro = float(selected_metrics["overall"]["macro_f1"])
+        total_errors = int((~np.all(preds == targets, axis=1)).sum())
+        print("\n========== READ THIS TEST SUMMARY ==========")
+        print(f"samples={targets.shape[0]} exact_match={exact:.4f} macro_f1={macro:.4f}")
+        for class_name in class_names:
+            source = selected_metrics["per_source"][class_name]
+            accuracy = (
+                (int(source["true_positive"]) + int(source["true_negative"])) / targets.shape[0]
+                if targets.shape[0] else 0.0
+            )
+            print(f"{class_name}: f1={float(source['f1']):.4f} acc={accuracy:.4f}")
+        print(f"total_errors={total_errors}")
+        print("confusions:")
+        found_confusion = False
+        for true_label, pred_counts in combo_confusion.items():
+            for pred_label, count in pred_counts.items():
+                if count and pred_label != true_label:
+                    print(f"  {true_label} -> {pred_label}: {count}")
+                    found_confusion = True
+        if not found_confusion:
+            print("  none")
+        print("============================================")
     return report
 
 
