@@ -30,6 +30,31 @@ def _discover_groups(root: Path) -> dict[str, list[Path]]:
     raise ValueError(f"No CSV files found under: {root}")
 
 
+def _parse_group_map(text: str) -> dict[str, int]:
+    mapping: dict[str, int] = {}
+    for item in text.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if "=" not in item:
+            raise argparse.ArgumentTypeError("group-label-map entries must use GROUP=INDEX")
+        group, index_text = item.split("=", 1)
+        group = group.strip()
+        try:
+            index = int(index_text.strip())
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(f"Invalid label index in {item!r}") from exc
+        if not group or index < 0 or group in mapping:
+            raise argparse.ArgumentTypeError(f"Invalid group-label-map entry: {item!r}")
+        mapping[group] = index
+    if not mapping:
+        raise argparse.ArgumentTypeError("group-label-map cannot be empty")
+    indices = sorted(mapping.values())
+    if indices != list(range(len(mapping))):
+        raise argparse.ArgumentTypeError("group-label-map indices must be unique contiguous values starting at 0")
+    return mapping
+
+
 def _split_group(files: list[Path], seed: int, val_ratio: float, test_ratio: float):
     if val_ratio < 0 or test_ratio < 0 or val_ratio + test_ratio >= 1:
         raise ValueError("val_ratio/test_ratio must be >=0 and sum to <1")
@@ -59,8 +84,16 @@ def build_from_raw(
     seed: int,
     val_ratio: float,
     test_ratio: float,
+    group_label_map: dict[str, int],
 ) -> dict:
     groups = _discover_groups(raw_root)
+    if set(groups) != set(group_label_map):
+        missing = sorted(set(groups) - set(group_label_map))
+        extra = sorted(set(group_label_map) - set(groups))
+        raise ValueError(
+            "group-label-map must exactly match discovered raw folders; "
+            f"missing={missing} extra={extra} discovered={sorted(groups)}"
+        )
     split = {}
     for i, (group, files) in enumerate(groups.items()):
         split[group] = _split_group(files, seed + i * 1009, val_ratio, test_ratio)
@@ -75,6 +108,7 @@ def build_from_raw(
         "test_ratio": test_ratio,
         "total_per_group": total,
         "available_train_per_group": available,
+        "group_label_map": group_label_map,
         "experiments": {},
     }
     fields = ["file", "source_root", "group", "condition_path", "label", "split", "selected_for_train"]
@@ -91,7 +125,8 @@ def build_from_raw(
         with out_path.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=fields)
             writer.writeheader()
-            for group_index, group in enumerate(group_names):
+            for group in group_names:
+                group_index = group_label_map[group]
                 label = "[" + ",".join("1" if j == group_index else "0" for j in range(len(group_names))) + "]"
                 train, val, test = split[group]
                 for split_name, files in (("train", train), ("val", val), ("test", test)):
@@ -120,6 +155,7 @@ def build_from_raw(
     manifest.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print("========== COPY THIS SUMMARY ==========")
     print("groups=" + ",".join(group_names))
+    print("group_label_map=" + json.dumps(group_label_map, ensure_ascii=False, sort_keys=True))
     print("total_per_group=" + json.dumps(total, ensure_ascii=False))
     print("available_train_per_group=" + json.dumps(available, ensure_ascii=False))
     for count in counts:
@@ -144,12 +180,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--val-ratio", type=float, default=0.15)
     parser.add_argument("--test-ratio", type=float, default=0.15)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--group-label-map",
+        type=_parse_group_map,
+        required=True,
+        help="Explicit raw-folder to model-label-index mapping, e.g. source_1=0,source_3=1,source_5=2.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    build_from_raw(args.raw_root, args.output_dir, args.counts, args.seed, args.val_ratio, args.test_ratio)
+    build_from_raw(
+        args.raw_root, args.output_dir, args.counts, args.seed,
+        args.val_ratio, args.test_ratio, args.group_label_map,
+    )
 
 
 if __name__ == "__main__":
