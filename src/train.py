@@ -407,10 +407,13 @@ def prepare_real_split(config: dict, class_names: list[str]) -> Path | None:
     index_path = Path(real_data_config.get("index_file", report_dir / "real_dataset_index.csv"))
     requested_split_path = Path(real_data_config.get("split_file", report_dir / "real_dataset_split.csv"))
 
-    # An explicitly supplied split is authoritative (e.g. sample-count ablation).
-    # Do not rebuild it in real_only mode, otherwise selected_for_train would be lost.
+    # An explicitly supplied split is authoritative for ordinary real-only
+    # training (e.g. sample-count ablation), but balanced_train must still be
+    # allowed to derive its quota-controlled split from the requested input.
     explicit_split = "split_file" in real_data_config
-    if explicit_split and requested_split_path.exists():
+    balanced_config = config.get("balanced_train", {})
+    balanced_enabled = bool(balanced_config.get("enabled", False))
+    if explicit_split and requested_split_path.exists() and not balanced_enabled:
         print(f"using explicit real split file: {requested_split_path}")
         return requested_split_path
 
@@ -430,8 +433,6 @@ def prepare_real_split(config: dict, class_names: list[str]) -> Path | None:
             include_combo=True,
         )
 
-    balanced_config = config.get("balanced_train", {})
-    balanced_enabled = bool(balanced_config.get("enabled", False))
     if balanced_enabled:
         quota = balanced_config.get("quota", {})
         if not isinstance(quota, dict) or not quota:
